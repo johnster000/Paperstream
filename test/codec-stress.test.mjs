@@ -12,7 +12,7 @@ let failures = 0;
 const check = (cond, msg) => { if (!cond) { failures++; console.log('  FAIL:', msg); } };
 
 console.log('constants: BLOCK_LEN', PS.BLOCK_LEN, 'DATA_BYTES', PS.DATA_BYTES);
-check(PS.BLOCK_LEN === 754 && PS.DATA_BYTES === 778, 'format constants changed; update CLAUDE.md if intentional');
+check(PS.BLOCK_LEN === 744 && PS.DATA_BYTES === 768, 'format constants changed; update CLAUDE.md if intentional');
 
 function trial(size, surplus, shuffle = true) {
   const original = new Uint8Array(size); for (let i = 0; i < size; i++) original[i] = Math.random() * 256 | 0;

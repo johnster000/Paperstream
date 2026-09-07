@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Paperstream, prototype encoder</title>
+<title>Paperstream</title>
 <style>
   :root {
     --desk: #E8E8E4;
@@ -21,6 +21,7 @@
     color: var(--ink);
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { margin: 0; background: var(--desk); }
 
   header.top {
@@ -89,12 +90,33 @@
   .log .bad { color: var(--bad); }
   .log a { color: var(--blue); }
 
+  nav.modes { margin-left: auto; display: flex; gap: 0; border: 1px solid var(--ink); }
+  nav.modes button { border: 0; padding: 6px 14px; background: var(--paper); }
+  nav.modes button + button { border-left: 1px solid var(--ink); }
+  nav.modes button[aria-pressed=true] { background: var(--ink); color: #fff; }
+
+  .progress { margin-top: 18px; height: 10px; background: var(--desk); border: 1px solid var(--rule); position: relative; }
+  .progress > div { height: 100%; background: var(--blue); width: 0; transition: width .15s linear; }
+  .progress.done > div { background: var(--ok); }
+  .hint { color: var(--muted); margin: 10px 0 0; }
+  .result { margin-top: 18px; padding: 12px 14px; border: 1px solid var(--ok); background: #F1FAF5; }
+  .result strong, .result span { display: block; }
+  .result strong { font-weight: 500; word-break: break-all; }
+  .result a { display: inline-block; margin-top: 8px; color: var(--blue); }
+
+  section.scan { padding: 24px; display: flex; flex-direction: column; gap: 14px; align-items: center; }
+  section.scan .empty { color: var(--muted); max-width: 46ch; align-self: flex-start; }
+  section.scan canvas { max-width: 100%; max-height: 82vh; background: #000; border: 1px solid var(--rule); display: none; }
+  section.scan canvas.live { display: block; }
+  section.scan video { display: none; }
+  .readout { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; align-self: stretch; display: flex; gap: 16px; flex-wrap: wrap; }
+
   section.pages { padding: 24px; display: flex; flex-direction: column; gap: 24px; align-items: center; }
   section.pages .empty { color: var(--muted); max-width: 46ch; align-self: flex-start; }
   section.pages svg { width: min(100%, 720px); height: auto; background: var(--paper); border: 1px solid var(--rule); display: block; }
 
   @media print {
-    header.top, aside.controls { display: none !important; }
+    header.top, aside.controls, section.scan { display: none !important; }
     html, body { background: #fff; }
     .app { display: block; min-height: 0; }
     section.pages { padding: 0; gap: 0; display: block; }
@@ -109,11 +131,16 @@
 
 <header class="top">
   <h1>Paperstream</h1>
-  <p>Prototype encoder. Turns a file into pages of fountain-coded tiles and checks they decode.</p>
+  <p>Files on paper. Encode a file into pages of tiles, or sweep a camera over printed pages to get it back.</p>
+  <nav class="modes" aria-label="Mode">
+    <button id="mode-encode" aria-pressed="true">Encode</button>
+    <button id="mode-decode" aria-pressed="false">Decode</button>
+  </nav>
 </header>
 
 <div class="app">
   <aside class="controls">
+    <div id="panel-encode">
     <div class="drop" id="drop">
       <strong>Pick a file</strong>
       <small>Everything stays in this tab. Drag a file here on desktop.</small>
@@ -157,14 +184,54 @@
       <button class="primary" id="encode" disabled>Encode</button>
       <button id="print" disabled>Print pages</button>
       <button id="verify" disabled>Verify roundtrip</button>
+      <button id="verify-scan" disabled>Verify with scanner</button>
     </div>
 
     <dl class="stats" id="stats" hidden></dl>
     <div class="log" id="log"></div>
+    </div>
+
+    <div id="panel-decode" hidden>
+      <div class="actions" style="margin-top:0">
+        <button class="primary" id="cam-start">Start camera</button>
+        <button id="cam-stop" disabled>Stop</button>
+        <button id="torch" hidden>Light</button>
+      </div>
+      <p class="hint">Hold the phone flat over the page, close enough that a tile is at least 250 pixels wide, and move slowly. Any page, any order. The bar fills as blocks come back.</p>
+      <label class="drop" for="scan-files" style="margin-top:14px">
+        <strong>Or choose photos or a video</strong>
+        <small>Sharp photos of each page work as well as a live sweep.</small>
+        <input type="file" id="scan-files" accept="image/*,video/*" multiple>
+      </label>
+      <fieldset>
+        <legend>Camera</legend>
+        <div class="row">
+          <label for="cam-res">Resolution</label>
+          <select id="cam-res">
+            <option value="1280x720">1280 × 720</option>
+            <option value="1920x1080" selected>1920 × 1080</option>
+            <option value="2560x1440">2560 × 1440</option>
+            <option value="3840x2160">3840 × 2160</option>
+          </select>
+        </div>
+      </fieldset>
+      <div class="progress" id="progress"><div id="bar"></div></div>
+      <dl class="stats" id="scan-stats"></dl>
+      <div class="result" id="result" hidden></div>
+      <div class="actions"><button id="scan-reset">Start over</button></div>
+      <div class="log" id="scan-log"></div>
+    </div>
   </aside>
 
   <section class="pages" id="pages">
-    <p class="empty">Pick a file and press Encode. The pages appear here and print one per sheet. Verify rasterizes the pages, reads every tile back from pixels, and rebuilds the file. Camera decoding is the next step and isn't in this build.</p>
+    <p class="empty">Pick a file and press Encode. The pages appear here and print one per sheet. Verify roundtrip samples every cell of the rendered pages on a grid and rebuilds the file. Verify with scanner runs the same camera pipeline the Decode tab uses over the rendered pages.</p>
+  </section>
+
+  <section class="scan" id="scan" hidden>
+    <p class="empty" id="scan-empty">Start the camera or choose photos. Tiles that decode are outlined in green, tiles that were found but failed their checksum in red. Stay on a page until its tiles have all gone green once, then move on.</p>
+    <canvas id="view"></canvas>
+    <div class="readout" id="readout"></div>
+    <video id="video" playsinline muted></video>
   </section>
 </div>
 
@@ -174,12 +241,15 @@
 //
 // Tile: 80 x 80 cells. Three 7x7 finder patterns (top-left, top-right,
 // bottom-left) and one 5x5 alignment mark (bottom-right), like QR, so a
-// tile's orientation is unambiguous. Every other cell is data, read in
-// row-major order, XORed with a fixed pseudo-random mask.
+// tile's orientation is unambiguous. Each sits in a reserved 8x8 corner block
+// so a one-cell white separator surrounds it: the scanner finds finders by
+// their 1:1:3:1:1 run ratios, which needs white on both sides of the outer
+// ring (data cells touching the ring hid about half the finders). Every other
+// cell is data, read in row-major order, XORed with a fixed pseudo-random mask.
 //
-// Data (778 bytes, 6228 bits, 4 spare bits):
+// Data (768 bytes, 6144 bits, no spare bits):
 //   header  20 bytes   magic 'PS', version, flags, fileId, K, blockLen, fileLen, tileIndex
-//   payload 754 bytes  one fountain-coded block
+//   payload 744 bytes  one fountain-coded block
 //   crc32    4 bytes   over header + payload
 //
 // Fountain code: systematic, with dense random repair tiles. Tiles 0..K-1 carry
@@ -190,7 +260,7 @@
 
 const PS = (() => {
   const TILE = 80;
-  const FINDER = 7, ALIGN = 5;
+  const FINDER = 7, ALIGN = 5, CORNER = 8;   // corner blocks include a one-cell white separator
   const HEADER_LEN = 20, CRC_LEN = 4;
   const MAGIC0 = 0x50, MAGIC1 = 0x53; // 'P','S'
   const VERSION = 0;
@@ -199,16 +269,17 @@ const PS = (() => {
   // ---- cell map ----
   const reserved = new Uint8Array(TILE * TILE);
   function markSquare(x0, y0, n) { for (let y = y0; y < y0 + n; y++) for (let x = x0; x < x0 + n; x++) reserved[y * TILE + x] = 1; }
-  markSquare(0, 0, FINDER);
-  markSquare(TILE - FINDER, 0, FINDER);
-  markSquare(0, TILE - FINDER, FINDER);
-  const ALIGN0 = TILE - FINDER;              // 73
-  markSquare(ALIGN0, ALIGN0, ALIGN);         // 73..77
+  markSquare(0, 0, CORNER);
+  markSquare(TILE - CORNER, 0, CORNER);
+  markSquare(0, TILE - CORNER, CORNER);
+  markSquare(TILE - CORNER, TILE - CORNER, CORNER);
+  const ALIGN0 = TILE - FINDER;              // 73: mark occupies 73..77, centre 75.5, separator at 72 and 78
   const dataCells = [];
   for (let i = 0; i < TILE * TILE; i++) if (!reserved[i]) dataCells.push(i);
-  const DATA_BITS = dataCells.length;        // 6228
-  const DATA_BYTES = Math.floor(DATA_BITS / 8); // 778
-  const BLOCK_LEN = DATA_BYTES - HEADER_LEN - CRC_LEN; // 754
+  const DATA_BITS = dataCells.length;        // 6144
+  const fixedCells = [];                     // [cellIndex, value] for every reserved cell (scanner checks these)
+  const DATA_BYTES = Math.floor(DATA_BITS / 8); // 768
+  const BLOCK_LEN = DATA_BYTES - HEADER_LEN - CRC_LEN; // 744
 
   // ---- mask ----
   const mask = new Uint8Array(DATA_BITS);
@@ -228,7 +299,7 @@ const PS = (() => {
     if (x >= TILE - FINDER && y < FINDER) return finderCell(x - (TILE - FINDER), y);
     if (x < FINDER && y >= TILE - FINDER) return finderCell(x, y - (TILE - FINDER));
     if (x >= ALIGN0 && x < ALIGN0 + ALIGN && y >= ALIGN0 && y < ALIGN0 + ALIGN) return alignCell(x - ALIGN0, y - ALIGN0);
-    return 0; // reserved but unused corner cells stay white
+    return 0; // separators and unused corner cells stay white
   }
 
   // ---- crc32 ----
@@ -422,9 +493,301 @@ const PS = (() => {
     return { accept, eliminate, progress, result, get meta() { return meta; }, get done() { return done; }, get tilesSeen() { return seen.size; }, get pendingCount() { return pending.length; } };
   }
 
-  return { TILE, BLOCK_LEN, DATA_BYTES, FLAG_GZIP, makeEncoder, readTile, makeDecoder, packContainer, unpackContainer, tileBlocks, crc32 };
+  for (let i = 0; i < TILE * TILE; i++) if (reserved[i]) fixedCells.push([i, fixedCell(i % TILE, (i / TILE) | 0)]);
+
+  return { TILE, BLOCK_LEN, DATA_BYTES, FLAG_GZIP, fixedCells, makeEncoder, readTile, makeDecoder, packContainer, unpackContainer, tileBlocks, crc32 };
 })();
 // ==== CODEC END ====
+</script>
+
+<script>
+// ==== VISION BEGIN ====
+// Camera-side pipeline. Pure functions over grayscale buffers, no DOM, so the
+// same code runs in the browser on camera frames and in node on synthetic
+// renders. Depends on PS (TILE, fixedCells, readTile).
+//
+// Steps per frame:
+//   1. grayscale, summed-area table, local-mean threshold (1 = ink)
+//   2. finder search: 1:1:3:1:1 run ratios on rows, cross-checked on the
+//      column and again on the row (the QR method). Works at any rotation
+//      because a line through the centre of nested squares keeps the ratios.
+//   3. group finders into tiles: a corner with two legs of equal length at a
+//      right angle; handedness picks which leg is TR and which is BL.
+//   4. affine estimate from the three finders, then search for the 5x5
+//      alignment mark near its predicted spot, then a homography from 4 points.
+//   5. check the fixed cells (finders + mark) match, sample all 80x80 cell
+//      centres with bilinear gray against the local threshold, PS.readTile.
+//      CRC has the last word; a false triple costs a few thousand samples.
+const PSV = (() => {
+  const TILE = PS.TILE;
+  const LEG = TILE - 7;                          // 73 cells between finder centres
+  const FC = 3.5, FG = TILE - 3.5, AC = TILE - 4.5; // finder centres 3.5 / 76.5, mark centre 75.5
+  const TILE_SRC = [[FC, FC], [FG, FC], [FC, FG], [AC, AC]];
+
+  function toGray(rgba, w, h) {
+    const g = new Uint8Array(w * h);
+    for (let i = 0, j = 0; i < g.length; i++, j += 4) g[i] = (rgba[j] * 77 + rgba[j + 1] * 150 + rgba[j + 2] * 29) >> 8;
+    return g;
+  }
+
+  // Summed-area table, (w+1) x (h+1). Uint32 is enough below ~16 megapixels.
+  function integral(g, w, h) {
+    const W = w + 1, I = new Uint32Array(W * (h + 1));
+    for (let y = 1; y <= h; y++) {
+      let row = 0; const o = (y - 1) * w, a = y * W, b = (y - 1) * W;
+      for (let x = 1; x <= w; x++) { row += g[o + x - 1]; I[a + x] = I[b + x] + row; }
+    }
+    return I;
+  }
+  function meanAt(I, w, h, x, y, r) {
+    const x0 = x - r > 0 ? x - r : 0, y0 = y - r > 0 ? y - r : 0;
+    const x1 = x + r + 1 < w ? x + r + 1 : w, y1 = y + r + 1 < h ? y + r + 1 : h;
+    const W = w + 1;
+    return (I[y1 * W + x1] - I[y0 * W + x1] - I[y1 * W + x0] + I[y0 * W + x0]) / ((x1 - x0) * (y1 - y0));
+  }
+  function binarize(g, I, w, h, r, bias) {
+    const bin = new Uint8Array(w * h), W = w + 1;
+    for (let y = 0; y < h; y++) {
+      const y0 = y - r > 0 ? y - r : 0, y1 = y + r + 1 < h ? y + r + 1 : h, rows = y1 - y0, a = y1 * W, b = y0 * W;
+      for (let x = 0; x < w; x++) {
+        const x0 = x - r > 0 ? x - r : 0, x1 = x + r + 1 < w ? x + r + 1 : w;
+        const mean = (I[a + x1] - I[b + x1] - I[a + x0] + I[b + x0]) / ((x1 - x0) * rows);
+        bin[y * w + x] = g[y * w + x] < mean - bias ? 1 : 0;
+      }
+    }
+    return bin;
+  }
+
+  // ---- finders ----
+  function ratioOk(r0, r1, r2, r3, r4, m) {
+    const v = m / 2;
+    return Math.abs(r0 - m) < v && Math.abs(r1 - m) < v && Math.abs(r2 - 3 * m) < 3 * v && Math.abs(r3 - m) < v && Math.abs(r4 - m) < v;
+  }
+  // Walk out from pixel (x, y) in direction (dx, dy) and back, through what
+  // should be the black centre; collect the five runs and check ratios. Steps
+  // are counted, so a diagonal walk sees the same 1:1:3:1:1 as an axis walk.
+  // Returns the signed offset of the run-2 centre in steps and the module.
+  function crossCheck(bin, w, h, x, y, dx, dy, m) {
+    const maxRun = Math.ceil(m * 5);
+    const at = k => { const px = x + k * dx, py = y + k * dy; return px < 0 || py < 0 || px >= w || py >= h ? 2 : bin[py * w + px]; };
+    if (at(0) !== 1) return null;
+    let a = 0, b = 0;
+    while (at(a - 1) === 1 && -a < maxRun) a--;
+    while (at(b + 1) === 1 && b < maxRun) b++;
+    let a1 = a; while (at(a1 - 1) === 0 && a - a1 < maxRun) a1--;
+    let a0 = a1; while (at(a0 - 1) === 1 && a1 - a0 < maxRun) a0--;
+    let b3 = b; while (at(b3 + 1) === 0 && b3 - b < maxRun) b3++;
+    let b4 = b3; while (at(b4 + 1) === 1 && b4 - b3 < maxRun) b4++;
+    const r0 = a1 - a0, r1 = a - a1, r2 = b - a + 1, r3 = b3 - b, r4 = b4 - b3;
+    if (r0 === 0 || r1 === 0 || r3 === 0 || r4 === 0) return null;
+    const total = r0 + r1 + r2 + r3 + r4, mm = total / 7;
+    if (!ratioOk(r0, r1, r2, r3, r4, mm)) return null;
+    if (Math.abs(total - 7 * m) > 7 * m * 0.5) return null;
+    return { off: (a + b + 1) / 2, m: mm };
+  }
+  // Returns [{x, y, m, n}]: centre in continuous image coords (pixel i spans
+  // [i, i+1)), module size in px, number of row confirmations.
+  function findFinders(bin, w, h, rowStep = 1) {
+    const cands = [];
+    for (let y = 0; y < h; y += rowStep) {
+      const o = y * w;
+      let r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, n = 0, cur = bin[o], len = 0;
+      for (let x = 0; x <= w; x++) {
+        const c = x < w ? bin[o + x] : 2;
+        if (c === cur) { len++; continue; }
+        r0 = r1; r1 = r2; r2 = r3; r3 = r4; r4 = len; if (n < 5) n++;
+        if (n === 5 && cur === 1) {
+          const m = (r0 + r1 + r2 + r3 + r4) / 7;
+          if (m >= 1.8 && ratioOk(r0, r1, r2, r3, r4, m)) {
+            const cx = x - r4 - r3 - r2 / 2;
+            const ix = Math.floor(cx);
+            const v = crossCheck(bin, w, h, ix, y, 0, 1, m);            // column through the centre
+            if (v) {
+              const iy = Math.floor(y + v.off);
+              const hz = crossCheck(bin, w, h, ix, iy, 1, 0, m);        // row, refined
+              const dg = hz && crossCheck(bin, w, h, ix, iy, 1, 1, m);  // diagonal: random data rarely passes all three
+              if (hz && dg) {
+                const fx = ix + hz.off, fy = y + v.off, fm = (v.m + hz.m) / 2;
+                let hit = null;
+                for (const k of cands) if (Math.abs(k.x - fx) < 2 * k.m && Math.abs(k.y - fy) < 2 * k.m && fm / k.m < 1.6 && k.m / fm < 1.6) { hit = k; break; }
+                if (hit) { hit.x = (hit.x * hit.n + fx) / (hit.n + 1); hit.y = (hit.y * hit.n + fy) / (hit.n + 1); hit.m = (hit.m * hit.n + fm) / (hit.n + 1); hit.n++; }
+                else cands.push({ x: fx, y: fy, m: fm, n: 1 });
+              }
+            }
+          }
+        }
+        cur = c; len = 1;
+      }
+    }
+    return cands.filter(k => k.n >= 2);
+  }
+
+  // ---- grouping ----
+  // Every plausible (corner, right, down) triple, best first. Legs must be
+  // about equal and at a right angle; the module estimate is only a loose
+  // filter because a rotated finder reads up to 1.4x wide on a row scan.
+  function candidateTriples(finders) {
+    const out = [];
+    for (let i = 0; i < finders.length; i++) {
+      const c = finders[i], lo = LEG * c.m * 0.6, hi = LEG * c.m * 1.45, nb = [];
+      for (let j = 0; j < finders.length; j++) {
+        if (j === i) continue; const f = finders[j], d = Math.hypot(f.x - c.x, f.y - c.y);
+        if (d >= lo && d <= hi && f.m / c.m < 1.8 && c.m / f.m < 1.8) nb.push(j);
+      }
+      for (let p = 0; p < nb.length; p++) for (let q = p + 1; q < nb.length; q++) {
+        const a = finders[nb[p]], b = finders[nb[q]];
+        const ux = a.x - c.x, uy = a.y - c.y, vx = b.x - c.x, vy = b.y - c.y;
+        const lu = Math.hypot(ux, uy), lv = Math.hypot(vx, vy);
+        const ratio = lu > lv ? lu / lv : lv / lu; if (ratio > 1.3) continue;   // strong keystone reaches 1.2
+        const cos = (ux * vx + uy * vy) / (lu * lv); if (Math.abs(cos) > 0.3) continue;
+        const cross = ux * vy - uy * vx; // > 0 when a is to the right and b is below (y down)
+        out.push({ tl: i, tr: cross > 0 ? nb[p] : nb[q], bl: cross > 0 ? nb[q] : nb[p], score: (ratio - 1) + Math.abs(cos) });
+      }
+    }
+    return out.sort((p, q) => p.score - q.score);
+  }
+
+  // ---- geometry ----
+  // Homography mapping src[i] -> dst[i] for four point pairs (DLT, h33 = 1).
+  function homography(src, dst) {
+    const A = [];
+    for (let i = 0; i < 4; i++) {
+      const [x, y] = src[i], [X, Y] = dst[i];
+      A.push([x, y, 1, 0, 0, 0, -x * X, -y * X, X]);
+      A.push([0, 0, 0, x, y, 1, -x * Y, -y * Y, Y]);
+    }
+    for (let c = 0; c < 8; c++) {
+      let p = c; for (let r = c + 1; r < 8; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+      if (Math.abs(A[p][c]) < 1e-12) return null;
+      [A[c], A[p]] = [A[p], A[c]];
+      for (let r = 0; r < 8; r++) { if (r === c) continue; const f = A[r][c] / A[c][c]; if (f === 0) continue; for (let k = c; k < 9; k++) A[r][k] -= f * A[c][k]; }
+    }
+    const H = new Float64Array(9); for (let i = 0; i < 8; i++) H[i] = A[i][8] / A[i][i]; H[8] = 1;
+    return H;
+  }
+  function project(H, x, y) { const d = H[6] * x + H[7] * y + H[8]; return [(H[0] * x + H[1] * y + H[2]) / d, (H[3] * x + H[4] * y + H[5]) / d]; }
+
+  // Search near the affine prediction for the 5x5 mark (black ring, white ring, black dot).
+  function findAlign(bin, w, h, tl, tr, bl) {
+    const exx = (tr.x - tl.x) / LEG, exy = (tr.y - tl.y) / LEG, eyx = (bl.x - tl.x) / LEG, eyy = (bl.y - tl.y) / LEG;
+    const px = tl.x + (AC - FC) * (exx + eyx), py = tl.y + (AC - FC) * (exy + eyy);
+    const scoreAt = (qx, qy) => {
+      let score = 0;
+      for (let j = -2; j <= 2; j++) for (let i = -2; i <= 2; i++) {
+        const sx = Math.floor(qx + i * exx + j * eyx), sy = Math.floor(qy + i * exy + j * eyy);
+        if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+        const ring = Math.max(Math.abs(i), Math.abs(j));
+        if (bin[sy * w + sx] === (ring === 1 ? 0 : 1)) score++;
+      }
+      return score;
+    };
+    // Perspective moves the mark up to ~10 cells off the affine guess: coarse
+    // pass over +-12 cells at one-cell steps, then a quarter-cell pass around
+    // every promising spot (a coarse sample half a cell off scores ~20 while a
+    // random spot can also score 20, so refine before choosing). The fine
+    // position is the centroid of the top-score plateau, which is sub-pixel
+    // accurate. Returns the two best; callers try both and CRC decides.
+    const coarse = [];
+    for (let dy = -12; dy <= 12; dy++) for (let dx = -12; dx <= 12; dx++) {
+      const s = scoreAt(px + dx * exx + dy * eyx, py + dx * exy + dy * eyy);
+      if (s >= 18) coarse.push({ s, dx, dy, d: dx * dx + dy * dy });
+    }
+    coarse.sort((a, b) => b.s - a.s || a.d - b.d);
+    const picks = [];
+    for (const c of coarse) {
+      if (picks.some(p => Math.abs(p.cx - c.dx) <= 2 && Math.abs(p.cy - c.dy) <= 2)) continue; // covered by a better neighbour's fine pass
+      let best = -1, sx = 0, sy = 0, n = 0;
+      for (let dy = c.dy - 1; dy <= c.dy + 1; dy += 0.25) for (let dx = c.dx - 1; dx <= c.dx + 1; dx += 0.25) {
+        const s = scoreAt(px + dx * exx + dy * eyx, py + dx * exy + dy * eyy);
+        if (s > best) { best = s; sx = dx; sy = dy; n = 1; } else if (s === best) { sx += dx; sy += dy; n++; }
+      }
+      const fx = sx / n, fy = sy / n;
+      picks.push({ cx: c.dx, cy: c.dy, dx: fx, dy: fy, score: best, x: px + fx * exx + fy * eyx, y: py + fx * exy + fy * eyy });
+      if (picks.length >= 6) break;
+    }
+    picks.sort((a, b) => b.score - a.score || (a.dx * a.dx + a.dy * a.dy) - (b.dx * b.dx + b.dy * b.dy));
+    picks.length = Math.min(picks.length, 2);
+    return { picks, predicted: [px, py], score: picks.length ? picks[0].score : 0 };
+  }
+
+  // Bilinear gray at a continuous point against the local mean. -1 = outside.
+  function sampleCell(g, I, w, h, x, y, r, bias) {
+    const u = x - 0.5, v = y - 0.5, x0 = Math.floor(u), y0 = Math.floor(v);
+    if (x0 < 0 || y0 < 0 || x0 + 1 >= w || y0 + 1 >= h) return -1;
+    const fx = u - x0, fy = v - y0, o = y0 * w + x0;
+    const val = g[o] * (1 - fx) * (1 - fy) + g[o + 1] * fx * (1 - fy) + g[o + w] * (1 - fx) * fy + g[o + w + 1] * fx * fy;
+    return val < meanAt(I, w, h, x0, y0, r) - bias ? 1 : 0;
+  }
+
+  function readWith(g, I, w, h, r, bias, H) {
+    let match = 0, seen = 0;
+    for (const [idx, v] of PS.fixedCells) {
+      const [px, py] = project(H, (idx % TILE) + 0.5, ((idx / TILE) | 0) + 0.5);
+      const s = sampleCell(g, I, w, h, px, py, r, bias);
+      if (s < 0) return { reason: 'edge' };
+      seen++; if (s === v) match++;
+    }
+    if (match / seen < 0.75) return { reason: 'pattern', match: match / seen }; // random data scores ~0.5; blurry real tiles reach 0.8
+    const m = new Uint8Array(TILE * TILE);
+    for (let y = 0; y < TILE; y++) for (let x = 0; x < TILE; x++) {
+      const [px, py] = project(H, x + 0.5, y + 0.5);
+      const s = sampleCell(g, I, w, h, px, py, r, bias);
+      if (s < 0) return { reason: 'edge' };
+      m[y * TILE + x] = s;
+    }
+    const tile = PS.readTile(m);
+    return tile ? { tile, match: match / seen } : { reason: 'crc', match: match / seen };
+  }
+
+  function decodeTile(g, I, bin, w, h, r, bias, tl, tr, bl) {
+    const al = findAlign(bin, w, h, tl, tr, bl);
+    const corners = [[tl.x, tl.y], [tr.x, tr.y], [bl.x, bl.y]];
+    const tries = al.picks.filter(p => p.score >= 21).map(p => [p.x, p.y]);
+    tries.push(al.predicted);
+    for (const p of al.picks) if (p.score < 21) tries.push([p.x, p.y]);
+    let last = { reason: 'degenerate' };
+    for (const br of tries) {
+      const H = homography(TILE_SRC, [...corners, br]);
+      if (!H) continue;
+      const res = readWith(g, I, w, h, r, bias, H);
+      const quad = [project(H, 0, 0), project(H, TILE, 0), project(H, TILE, TILE), project(H, 0, TILE)];
+      if (res.tile) return { ok: true, tile: res.tile, quad, H, align: al.score };
+      last = { ok: false, reason: res.reason, quad, align: al.score, match: res.match };
+      if (res.reason === 'edge') break;
+    }
+    return last;
+  }
+
+  // Cheap focus measure for the UI: mean absolute neighbour difference on a grid.
+  function focus(g, w, h) {
+    let acc = 0, n = 0;
+    for (let y = 2; y < h - 2; y += 4) for (let x = 2; x < w - 2; x += 4) { acc += Math.abs(g[y * w + x] - g[y * w + x + 2]); n++; }
+    return n ? acc / n : 0;
+  }
+
+  // Main entry. `px` is RGBA (w*h*4) or gray (w*h).
+  // Returns { finders, tiles: [{ok, tile?, quad, reason?}], focus, ms }.
+  function decodeFrame(px, w, h, opts = {}) {
+    const t0 = Date.now();
+    const g = px.length === w * h ? px : toGray(px, w, h);
+    const r = opts.radius || Math.max(10, Math.round(Math.min(w, h) / 20));
+    const bias = opts.bias === undefined ? 8 : opts.bias;
+    const I = integral(g, w, h);
+    const bin = binarize(g, I, w, h, r, bias);
+    const finders = findFinders(bin, w, h, opts.rowStep || 1);
+    const used = new Uint8Array(finders.length), tiles = [];
+    for (const t of candidateTriples(finders)) {
+      if (used[t.tl] || used[t.tr] || used[t.bl]) continue;
+      const res = decodeTile(g, I, bin, w, h, r, bias, finders[t.tl], finders[t.tr], finders[t.bl]);
+      if (res.ok) used[t.tl] = used[t.tr] = used[t.bl] = 1;
+      tiles.push(res);
+    }
+    return { finders, tiles, focus: focus(g, w, h), ms: Date.now() - t0, gray: g, bin };
+  }
+
+  return { toGray, integral, binarize, findFinders, candidateTriples, homography, project, findAlign, decodeTile, decodeFrame, focus };
+})();
+// ==== VISION END ====
 </script>
 
 <script>
@@ -534,7 +897,21 @@ async function encode() {
     ['Encode time', `${((performance.now() - t0) / 1000).toFixed(1)} s`],
   ];
   for (const [k, v] of rowsOut) { const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); dd.textContent = v; stats.append(dt, dd); }
-  $('print').disabled = false; $('verify').disabled = false;
+  $('print').disabled = false; $('verify').disabled = false; $('verify-scan').disabled = false;
+}
+
+// Rasterize one rendered page to a canvas at ppc pixels per cell (capped by pixel budget).
+async function rasterizePage(svgText, ppc) {
+  const L = state.layout, P = L.page;
+  const ppi = ppc / L.cell;
+  const cw = Math.round(P.w * ppi), ch = Math.round(P.h * ppi);
+  const img = new Image();
+  await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('SVG rasterization failed')); img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText); });
+  const cv = document.createElement('canvas'); cv.width = cw; cv.height = ch;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cw, ch);
+  ctx.drawImage(img, 0, 0, cw, ch);
+  return { ctx, cw, ch };
 }
 
 // Rasterize each SVG page to a canvas, sample every cell at its centre, decode.
@@ -584,12 +961,218 @@ async function verify() {
   const p = document.createElement('p'); p.appendChild(a); $('log').appendChild(p);
 }
 
+// Run the camera pipeline (PSV) over the rendered pages: finders, homography,
+// resampling, CRC. Slower than verify(), but exercises what the Decode tab uses.
+async function verifyScan() {
+  $('log').textContent = '';
+  const L = state.layout, P = L.page;
+  const ppc = Math.min(3, Math.sqrt(12e6 / ((P.w / L.cell) * (P.h / L.cell)))); // keep pages under ~12 megapixels
+  const dec = PS.makeDecoder();
+  let tilesRead = 0, tilesBad = 0, finders = 0;
+  const t0 = performance.now();
+  const status = log('Scanning rendered pages…');
+  for (let pi = 0; pi < state.pages.length; pi++) {
+    const { ctx, cw, ch } = await rasterizePage(state.pages[pi], ppc);
+    const res = PSV.decodeFrame(ctx.getImageData(0, 0, cw, ch).data, cw, ch);
+    finders += res.finders.length;
+    for (const t of res.tiles) { if (t.ok) { tilesRead++; dec.accept(t.tile); } else tilesBad++; }
+    status.textContent = `Page ${pi + 1}/${state.pages.length}: ${finders} finders, ${tilesRead} tiles read, ${tilesBad} rejected, ${Math.round(dec.progress() * 100)}% of blocks recovered`;
+    await new Promise(r => setTimeout(r, 0));
+    if (dec.done) break;
+  }
+  if (!dec.done) { log('Peeling stalled, running elimination…'); dec.eliminate(); }
+  if (!dec.done) { log(`Could not rebuild the file: ${Math.round(dec.progress() * 100)}% of blocks recovered from ${dec.tilesSeen} tiles.`, 'bad'); return; }
+  const { container, flags } = dec.result();
+  const { name, data } = PS.unpackContainer(container);
+  const bytes = await decompress(data, flags);
+  const same = bytes.length === state.original.length && PS.crc32(bytes) === PS.crc32(state.original);
+  log(`Scanner rebuilt ${name}, ${fmtBytes(bytes.length)} from ${dec.tilesSeen} tiles at ${ppc.toFixed(1)} px/cell in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
+  log(same ? 'Byte-for-byte identical to the original.' : 'Output differs from the original.', same ? 'ok' : 'bad');
+}
+
+// ==== DECODE (camera) ====
+const scan = { dec: null, stream: null, running: false, frames: 0, tilesOk: 0, tilesBad: 0, newSinceElim: 0, lastElim: 0, source: null, finished: false };
+const video = $('video'), view = $('view'), vctx = view.getContext('2d');
+const work = document.createElement('canvas'), wctx = work.getContext('2d', { willReadFrequently: true });
+const slog = (msg, cls) => { const p = document.createElement('p'); if (cls) p.className = cls; p.textContent = msg; $('scan-log').appendChild(p); return p; };
+
+function setMode(mode) {
+  const enc = mode === 'encode';
+  $('mode-encode').setAttribute('aria-pressed', String(enc)); $('mode-decode').setAttribute('aria-pressed', String(!enc));
+  $('panel-encode').hidden = !enc; $('panel-decode').hidden = enc;
+  $('pages').hidden = !enc; $('scan').hidden = enc;
+  if (enc) stopCamera();
+}
+$('mode-encode').addEventListener('click', () => setMode('encode'));
+$('mode-decode').addEventListener('click', () => setMode('decode'));
+
+function resetScan() {
+  stopCamera();
+  scan.dec = PS.makeDecoder(); scan.frames = 0; scan.tilesOk = 0; scan.tilesBad = 0; scan.newSinceElim = 0; scan.finished = false;
+  $('scan-log').textContent = ''; $('result').hidden = true; $('result').textContent = '';
+  $('progress').classList.remove('done'); $('bar').style.width = '0';
+  $('scan-stats').innerHTML = ''; $('readout').textContent = '';
+  view.classList.remove('live'); $('scan-empty').hidden = false;
+  $('cam-start').disabled = false;
+}
+function updateScanStats(res) {
+  const dec = scan.dec, meta = dec.meta;
+  $('bar').style.width = (dec.progress() * 100).toFixed(1) + '%';
+  const rows = [
+    ['File', meta ? `${meta.K} blocks, ${fmtBytes(meta.fileLen)}` : 'waiting for the first tile'],
+    ['Blocks recovered', meta ? `${Math.round(dec.progress() * meta.K)} of ${meta.K}` : '0'],
+    ['Distinct tiles', String(dec.tilesSeen)],
+    ['Frames', String(scan.frames)],
+  ];
+  const s = $('scan-stats'); s.innerHTML = '';
+  for (const [k, v] of rows) { const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); dd.textContent = v; s.append(dt, dd); }
+  if (res) $('readout').textContent = `${res.finders.length} finders · ${res.tiles.filter(t => t.ok).length} tiles read · ${res.tiles.filter(t => !t.ok).length} rejected · focus ${res.focus.toFixed(0)} · ${res.ms} ms`;
+}
+function drawOverlay(source, w, h, res) {
+  if (view.width !== w || view.height !== h) { view.width = w; view.height = h; }
+  vctx.drawImage(source, 0, 0, w, h);
+  vctx.lineWidth = Math.max(2, w / 500);
+  for (const f of res.finders) { vctx.strokeStyle = 'rgba(43,95,217,0.9)'; vctx.beginPath(); vctx.arc(f.x, f.y, f.m * 3.5, 0, Math.PI * 2); vctx.stroke(); }
+  for (const t of res.tiles) {
+    if (!t.quad || (!t.ok && t.reason !== 'crc')) continue; // geometric rejections are cheap noise; show only checksum failures
+    vctx.strokeStyle = t.ok ? 'rgba(30,127,79,0.95)' : 'rgba(179,38,30,0.9)';
+    vctx.beginPath(); vctx.moveTo(t.quad[0][0], t.quad[0][1]); for (let i = 1; i < 4; i++) vctx.lineTo(t.quad[i][0], t.quad[i][1]); vctx.closePath(); vctx.stroke();
+    if (t.ok) { vctx.fillStyle = 'rgba(30,127,79,0.18)'; vctx.fill(); }
+  }
+  view.classList.add('live'); $('scan-empty').hidden = true;
+}
+// Decode one frame from any drawable source. Returns the frame result.
+function processFrame(source, w, h) {
+  if (!scan.dec) scan.dec = PS.makeDecoder();
+  if (work.width !== w || work.height !== h) { work.width = w; work.height = h; }
+  wctx.drawImage(source, 0, 0, w, h);
+  const res = PSV.decodeFrame(wctx.getImageData(0, 0, w, h).data, w, h);
+  scan.frames++;
+  for (const t of res.tiles) {
+    if (!t.ok) { scan.tilesBad++; continue; }
+    scan.tilesOk++;
+    const r = scan.dec.accept(t.tile);
+    if (r.accepted) scan.newSinceElim++;
+    else if (r.reason === 'other file') t.reason = 'other'; // tile from a different file
+  }
+  const dec = scan.dec, now = performance.now();
+  if (!dec.done && dec.meta && dec.tilesSeen >= dec.meta.K && scan.newSinceElim > 0 && now - scan.lastElim > 400) { scan.lastElim = now; scan.newSinceElim = 0; dec.eliminate(); }
+  drawOverlay(source, w, h, res);
+  updateScanStats(res);
+  if (dec.done && !scan.finished) finishScan();
+  return res;
+}
+async function finishScan() {
+  scan.finished = true;
+  stopCamera();
+  $('progress').classList.add('done');
+  const { container, flags } = scan.dec.result();
+  const { name, data } = PS.unpackContainer(container);
+  let bytes;
+  try { bytes = await decompress(data, flags); } catch (e) { slog('Decompression failed: ' + e.message, 'bad'); return; }
+  const box = $('result'); box.hidden = false; box.innerHTML = '';
+  const strong = document.createElement('strong'); strong.textContent = name; box.appendChild(strong);
+  const p = document.createElement('span'); p.textContent = `${fmtBytes(bytes.length)}, rebuilt from ${scan.dec.tilesSeen} tiles in ${scan.frames} frame${scan.frames === 1 ? '' : 's'}.`; box.appendChild(p);
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([bytes])); a.download = name || 'paperstream.bin'; a.textContent = 'Save the file'; box.appendChild(a);
+  slog('Done. The file is complete.', 'ok');
+}
+
+// ---- live camera ----
+async function startCamera() {
+  if (scan.finished) resetScan();
+  const [rw, rh] = $('cam-res').value.split('x').map(Number);
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { slog('This browser does not offer camera access here. Use "choose photos or a video" instead.', 'bad'); return; }
+  try {
+    scan.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: rw }, height: { ideal: rh } }, audio: false });
+  } catch (e) { slog('Camera unavailable: ' + e.message + '. You can still choose photos or a video.', 'bad'); return; }
+  video.srcObject = scan.stream;
+  await video.play();
+  const track = scan.stream.getVideoTracks()[0];
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  if (caps.focusMode && caps.focusMode.includes('continuous')) track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+  $('torch').hidden = !caps.torch; $('torch').dataset.on = '0';
+  scan.running = true; $('cam-start').disabled = true; $('cam-stop').disabled = false;
+  const settings = track.getSettings ? track.getSettings() : {};
+  slog(`Camera running at ${settings.width || '?'} × ${settings.height || '?'}.`);
+  const loop = () => {
+    if (!scan.running) return;
+    if (video.readyState >= 2 && video.videoWidth) { try { processFrame(video, video.videoWidth, video.videoHeight); } catch (e) { slog('Frame error: ' + e.message, 'bad'); } }
+    if (!scan.running) return;
+    if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(loop); else requestAnimationFrame(loop);
+  };
+  loop();
+}
+function stopCamera() {
+  scan.running = false;
+  if (scan.stream) { for (const t of scan.stream.getTracks()) t.stop(); scan.stream = null; }
+  video.srcObject = null;
+  $('cam-start').disabled = scan.finished; $('cam-stop').disabled = true; $('torch').hidden = true;
+}
+$('torch').addEventListener('click', async () => {
+  const track = scan.stream && scan.stream.getVideoTracks()[0]; if (!track) return;
+  const on = $('torch').dataset.on !== '1';
+  try { await track.applyConstraints({ advanced: [{ torch: on }] }); $('torch').dataset.on = on ? '1' : '0'; $('torch').textContent = on ? 'Light off' : 'Light'; } catch (e) { slog('Light not available: ' + e.message, 'bad'); }
+});
+
+// ---- photos and video files ----
+const MAX_SIDE = 4096; // photos above this are scaled down; keeps the summed-area table in 32 bits
+async function scanFiles(files) {
+  if (scan.finished) resetScan();
+  stopCamera();
+  scan.running = true; $('cam-stop').disabled = false;
+  for (const f of files) {
+    if (!scan.running || (scan.dec && scan.dec.done)) break;
+    if (f.type.startsWith('video/')) await scanVideoFile(f);
+    else await scanPhoto(f);
+  }
+  scan.running = false; $('cam-stop').disabled = true;
+  if (scan.dec && !scan.dec.done) {
+    if (scan.dec.meta && scan.dec.tilesSeen >= scan.dec.meta.K) scan.dec.eliminate();
+    if (scan.dec.done) finishScan();
+    else slog(scan.dec.meta ? `Not complete yet: ${Math.round(scan.dec.progress() * 100)}% of blocks from ${scan.dec.tilesSeen} tiles. Add more photos or pages.` : 'No tiles found. Try sharper, closer photos.', 'bad');
+  }
+}
+async function scanPhoto(f) {
+  let bmp;
+  try { bmp = await createImageBitmap(f); } catch (e) { slog(`${f.name}: could not open (${e.message})`, 'bad'); return; }
+  const k = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+  const w = Math.round(bmp.width * k), h = Math.round(bmp.height * k);
+  const res = processFrame(bmp, w, h);
+  bmp.close && bmp.close();
+  slog(`${f.name}: ${res.finders.length} finders, ${res.tiles.filter(t => t.ok).length} tiles read, ${res.tiles.filter(t => !t.ok).length} rejected`);
+  await new Promise(r => setTimeout(r, 0));
+}
+async function scanVideoFile(f) {
+  const url = URL.createObjectURL(f);
+  try {
+    video.src = url;
+    await new Promise((res, rej) => { video.onloadedmetadata = res; video.onerror = () => rej(new Error('cannot play this video')); });
+    const step = 0.15, dur = video.duration;
+    const status = slog(`${f.name}: scanning…`);
+    for (let t = 0; t < dur && scan.running && !scan.dec.done; t += step) {
+      video.currentTime = t;
+      await new Promise(res => { video.onseeked = res; });
+      processFrame(video, video.videoWidth, video.videoHeight);
+      status.textContent = `${f.name}: ${Math.round(100 * t / dur)}%, ${scan.dec.tilesSeen} tiles so far`;
+      await new Promise(r => setTimeout(r, 0));
+    }
+    status.textContent = `${f.name}: done, ${scan.dec.tilesSeen} distinct tiles`;
+  } catch (e) { slog(`${f.name}: ${e.message}`, 'bad'); }
+  finally { video.removeAttribute('src'); video.load(); URL.revokeObjectURL(url); }
+}
+
+$('cam-start').addEventListener('click', () => startCamera().catch(e => slog(e.message, 'bad')));
+$('cam-stop').addEventListener('click', () => { scan.running = false; stopCamera(); });
+$('scan-reset').addEventListener('click', resetScan);
+$('scan-files').addEventListener('change', e => { const files = [...e.target.files]; e.target.value = ''; scanFiles(files).catch(err => slog(err.message, 'bad')); });
+resetScan();
+
 // ---- wiring ----
 async function setFile(f) {
   if (!f) return;
   state.file = f; state.name = f.name; state.original = new Uint8Array(await f.arrayBuffer());
   $('filename').innerHTML = `${escapeXml(f.name)} <span>${fmtBytes(f.size)}</span>`;
-  $('encode').disabled = false; $('print').disabled = true; $('verify').disabled = true;
+  $('encode').disabled = false; $('print').disabled = true; $('verify').disabled = true; $('verify-scan').disabled = true;
 }
 $('file').addEventListener('change', e => setFile(e.target.files[0]));
 const drop = $('drop');
@@ -610,6 +1193,7 @@ $('use-sample').addEventListener('click', () => {
 $('encode').addEventListener('click', () => encode().catch(err => log(err.message, 'bad')));
 $('print').addEventListener('click', () => window.print());
 $('verify').addEventListener('click', () => verify().catch(err => log(err.message, 'bad')));
+$('verify-scan').addEventListener('click', () => verifyScan().catch(err => log(err.message, 'bad')));
 </script>
 </body>
 </html>
