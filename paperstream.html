@@ -1189,10 +1189,24 @@ async function finishScan() {
 async function startCamera() {
   if (scan.finished) resetScan();
   const [rw, rh] = $('cam-res').value.split('x').map(Number);
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { slog('This browser does not offer camera access here. Use "choose photos or a video" instead.', 'bad'); return; }
+  // Browsers only hand out the camera to a top-level page on https (or a local file / localhost). Say which rule bit.
+  const framed = window.self !== window.top;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    slog(!window.isSecureContext ? 'The camera needs a secure page: open this file over https, from localhost, or directly as a file. Photos and videos still work below.'
+      : 'This browser does not offer camera access here. Use "choose photos or a video" instead.', 'bad');
+    return;
+  }
   try {
     scan.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: rw }, height: { ideal: rh } }, audio: false });
-  } catch (e) { slog('Camera unavailable: ' + e.message + '. You can still choose photos or a video.', 'bad'); return; }
+  } catch (e) {
+    let why = e.message;
+    if (framed && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) why = 'this page is embedded inside another page, which blocks the camera. Open paperstream.html in its own tab';
+    else if (e.name === 'NotAllowedError') why = 'permission was denied. Allow the camera for this site in the browser settings and try again';
+    else if (e.name === 'NotFoundError') why = 'no camera was found';
+    else if (e.name === 'NotReadableError') why = 'another app is using the camera';
+    slog('Camera unavailable: ' + why + '. You can still choose photos or a video below.', 'bad');
+    return;
+  }
   video.srcObject = scan.stream;
   await video.play();
   const track = scan.stream.getVideoTracks()[0];
