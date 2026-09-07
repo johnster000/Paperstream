@@ -197,7 +197,7 @@
         <button id="cam-stop" disabled>Stop</button>
         <button id="torch" hidden>Light</button>
       </div>
-      <p class="hint">Hold the phone flat over the page, close enough that a tile is at least 250 pixels wide, and move slowly. Any page, any order. The bar fills as blocks come back.</p>
+      <p class="hint">Bright light, phone flat over the page, 20 to 30 cm away so the lens can focus, then hold still until green tiles appear before moving on. Any page, any order. The bar fills as blocks come back.</p>
       <label class="drop" for="scan-files" style="margin-top:14px">
         <strong>Or choose photos or a video</strong>
         <small>Sharp photos of each page work as well as a live sweep.</small>
@@ -208,17 +208,18 @@
         <div class="row">
           <label for="cam-res">Resolution</label>
           <select id="cam-res">
-            <option value="1280x720">1280 × 720</option>
-            <option value="1920x1080" selected>1920 × 1080</option>
+            <option value="3840x2160" selected>Highest available</option>
             <option value="2560x1440">2560 × 1440</option>
-            <option value="3840x2160">3840 × 2160</option>
+            <option value="1920x1080">1920 × 1080</option>
+            <option value="1280x720">1280 × 720</option>
           </select>
         </div>
       </fieldset>
       <div class="progress" id="progress"><div id="bar"></div></div>
       <dl class="stats" id="scan-stats"></dl>
       <div class="result" id="result" hidden></div>
-      <div class="actions"><button id="scan-reset">Start over</button></div>
+      <div class="actions"><button id="save-frame" disabled>Save this frame</button><button id="scan-reset">Start over</button></div>
+      <p class="hint">Save this frame keeps the last camera image as a PNG, exactly as the scanner saw it. Put a few in <code>fixtures/</code> to tune against real prints.</p>
       <div class="log" id="scan-log"></div>
     </div>
   </aside>
@@ -769,17 +770,19 @@ const PSV = (() => {
   }
   function project(H, x, y) { const d = H[6] * x + H[7] * y + H[8]; return [(H[0] * x + H[1] * y + H[2]) / d, (H[3] * x + H[4] * y + H[5]) / d]; }
 
-  // Search near the affine prediction for the 5x5 mark (black ring, white ring, black dot).
-  function findAlign(bin, w, h, tl, tr, bl) {
+  // Search near the affine prediction for the 5x5 mark (black ring, white ring,
+  // black dot), sampling the full-resolution gray: the mark's one-cell rings
+  // do not survive a half-resolution binarization.
+  function findAlign(g, I, w, h, r, bias, tl, tr, bl) {
     const exx = (tr.x - tl.x) / LEG, exy = (tr.y - tl.y) / LEG, eyx = (bl.x - tl.x) / LEG, eyy = (bl.y - tl.y) / LEG;
     const px = tl.x + (AC - FC) * (exx + eyx), py = tl.y + (AC - FC) * (exy + eyy);
     const scoreAt = (qx, qy) => {
       let score = 0;
       for (let j = -2; j <= 2; j++) for (let i = -2; i <= 2; i++) {
-        const sx = Math.floor(qx + i * exx + j * eyx), sy = Math.floor(qy + i * exy + j * eyy);
-        if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+        const d = sampleCell(g, I, w, h, qx + i * exx + j * eyx, qy + i * exy + j * eyy, r, bias);
+        if (d !== d) continue;
         const ring = Math.max(Math.abs(i), Math.abs(j));
-        if (bin[sy * w + sx] === (ring === 1 ? 0 : 1)) score++;
+        if ((d > 0 ? 1 : 0) === (ring === 1 ? 0 : 1)) score++;
       }
       return score;
     };
@@ -847,8 +850,8 @@ const PSV = (() => {
     return tile ? { tile, match: match / seen, weak: weak.length } : { reason: 'crc', match: match / seen, weak: weak.length };
   }
 
-  function decodeTile(g, I, bin, w, h, r, bias, tl, tr, bl) {
-    const al = findAlign(bin, w, h, tl, tr, bl);
+  function decodeTile(g, I, w, h, r, bias, tl, tr, bl) {
+    const al = findAlign(g, I, w, h, r, bias, tl, tr, bl);
     const corners = [[tl.x, tl.y], [tr.x, tr.y], [bl.x, bl.y]];
     const tries = al.picks.filter(p => p.score >= 21).map(p => [p.x, p.y]);
     tries.push(al.predicted);
@@ -873,24 +876,50 @@ const PSV = (() => {
     return n ? acc / n : 0;
   }
 
+  // 2x2 box downsample for the detection stage on big frames.
+  function halve(g, w, h) {
+    const wd = w >> 1, hd = h >> 1, out = new Uint8Array(wd * hd);
+    for (let y = 0; y < hd; y++) { const a = 2 * y * w, b = a + w, o = y * wd; for (let x = 0; x < wd; x++) { const i = 2 * x; out[o + x] = (g[a + i] + g[a + i + 1] + g[b + i] + g[b + i + 1] + 2) >> 2; } }
+    return out;
+  }
+
+  // Threshold + finder search at one scale. Finder coordinates come back in full-resolution units.
+  function detect(g, w, h, s, bias, rowStep) {
+    const gd = s === 2 ? halve(g, w, h) : g, wd = s === 2 ? w >> 1 : w, hd = s === 2 ? h >> 1 : h;
+    const rd = Math.max(10, Math.round(Math.min(wd, hd) / 20));
+    const Id = integral(gd, wd, hd), bin = binarize(gd, Id, wd, hd, rd, bias);
+    const finders = findFinders(bin, wd, hd, rowStep);
+    if (s !== 1) for (const f of finders) { f.x *= s; f.y *= s; f.m *= s; }
+    return { finders, bin, I: s === 1 ? Id : null, r: rd * s, s };
+  }
+
   // Main entry. `px` is RGBA (w*h*4) or gray (w*h).
-  // Returns { finders, tiles: [{ok, tile?, quad, reason?}], focus, ms }.
+  // On frames above ~1080p the finder search first runs on a half-resolution
+  // copy, which costs a quarter as much. Finders are 7 cells wide and survive
+  // halving when cells are 4+ px; if that pass finds too few finders or they
+  // measure small (a distant page), the search reruns at full resolution.
+  // Cells and the alignment mark are always sampled from the full-res gray.
+  // Returns { finders, tiles: [{ok, tile?, quad, reason?}], focus, ms, detectScale }.
   function decodeFrame(px, w, h, opts = {}) {
     const t0 = Date.now();
     const g = px.length === w * h ? px : toGray(px, w, h);
-    const r = opts.radius || Math.max(10, Math.round(Math.min(w, h) / 20));
-    const bias = opts.bias === undefined ? 8 : opts.bias;
-    const I = integral(g, w, h);
-    const bin = binarize(g, I, w, h, r, bias);
-    const finders = findFinders(bin, w, h, opts.rowStep || 1);
+    const bias = opts.bias === undefined ? 8 : opts.bias, rowStep = opts.rowStep || 1;
+    let d = null;
+    if (opts.detectScale !== 1 && Math.min(w, h) >= 1500) {
+      d = detect(g, w, h, 2, bias, rowStep);
+      const ms = d.finders.map(f => f.m).sort((a, b) => a - b), median = ms.length ? ms[ms.length >> 1] : 0;
+      if (d.finders.length < 6 || median < 6) d = null; // too sparse or too small to trust the coarse pass (a 45-degree finder reads 1.4x wide, so 6 means ~4 px cells)
+    }
+    if (!d) d = detect(g, w, h, 1, bias, rowStep);
+    const { finders, bin, s } = d, I = d.I || integral(g, w, h), r = d.r;
     const used = new Uint8Array(finders.length), tiles = [];
     for (const t of candidateTriples(finders)) {
       if (used[t.tl] || used[t.tr] || used[t.bl]) continue;
-      const res = decodeTile(g, I, bin, w, h, r, bias, finders[t.tl], finders[t.tr], finders[t.bl]);
+      const res = decodeTile(g, I, w, h, r, bias, finders[t.tl], finders[t.tr], finders[t.bl]);
       if (res.ok) used[t.tl] = used[t.tr] = used[t.bl] = 1;
       tiles.push(res);
     }
-    return { finders, tiles, focus: focus(g, w, h), ms: Date.now() - t0, gray: g, bin };
+    return { finders, tiles, focus: focus(g, w, h), ms: Date.now() - t0, gray: g, bin, detectScale: s };
   }
 
   return { toGray, integral, binarize, findFinders, candidateTriples, homography, project, findAlign, decodeTile, decodeFrame, focus };
@@ -1098,6 +1127,13 @@ async function verifyScan() {
   log(same ? 'Byte-for-byte identical to the original.' : 'Output differs from the original.', same ? 'ok' : 'bad');
 }
 
+// Hand a file to the user. Plain anchor download; hosts that block page-initiated downloads can replace this.
+function saveBlob(blob, name) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+
 // ==== DECODE (camera) ====
 const scan = { dec: null, stream: null, running: false, frames: 0, tilesOk: 0, tilesBad: 0, newSinceElim: 0, lastElim: 0, source: null, finished: false };
 const video = $('video'), view = $('view'), vctx = view.getContext('2d');
@@ -1121,7 +1157,7 @@ function resetScan() {
   $('progress').classList.remove('done'); $('bar').style.width = '0';
   $('scan-stats').innerHTML = ''; $('readout').textContent = '';
   view.classList.remove('live'); $('scan-empty').hidden = false;
-  $('cam-start').disabled = false;
+  $('cam-start').disabled = false; $('save-frame').disabled = true; scan.lastFrame = null;
 }
 function updateScanStats(res) {
   const dec = scan.dec, meta = dec.meta;
@@ -1155,7 +1191,7 @@ function processFrame(source, w, h) {
   if (work.width !== w || work.height !== h) { work.width = w; work.height = h; }
   wctx.drawImage(source, 0, 0, w, h);
   const res = PSV.decodeFrame(wctx.getImageData(0, 0, w, h).data, w, h);
-  scan.frames++;
+  scan.frames++; scan.lastFrame = { w, h }; $('save-frame').disabled = false;
   for (const t of res.tiles) {
     if (!t.ok) { scan.tilesBad++; continue; }
     scan.tilesOk++;
@@ -1181,7 +1217,9 @@ async function finishScan() {
   const box = $('result'); box.hidden = false; box.innerHTML = '';
   const strong = document.createElement('strong'); strong.textContent = name; box.appendChild(strong);
   const p = document.createElement('span'); p.textContent = `${fmtBytes(bytes.length)}, rebuilt from ${scan.dec.tilesSeen} tiles in ${scan.frames} frame${scan.frames === 1 ? '' : 's'}.`; box.appendChild(p);
-  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([bytes])); a.download = name || 'paperstream.bin'; a.textContent = 'Save the file'; box.appendChild(a);
+  const a = document.createElement('a'); a.href = '#'; a.textContent = 'Save the file';
+  a.addEventListener('click', e => { e.preventDefault(); saveBlob(new Blob([bytes]), name || 'paperstream.bin'); });
+  box.appendChild(a);
   slog('Done. The file is complete.', 'ok');
 }
 
@@ -1215,7 +1253,7 @@ async function startCamera() {
   $('torch').hidden = !caps.torch; $('torch').dataset.on = '0';
   scan.running = true; $('cam-start').disabled = true; $('cam-stop').disabled = false;
   const settings = track.getSettings ? track.getSettings() : {};
-  slog(`Camera running at ${settings.width || '?'} × ${settings.height || '?'}.`);
+  slog(`Camera running at ${settings.width || '?'} × ${settings.height || '?'}${settings.focusMode ? ', focus ' + settings.focusMode : ''}.`);
   const loop = () => {
     if (!scan.running) return;
     if (video.readyState >= 2 && video.videoWidth) { try { processFrame(video, video.videoWidth, video.videoHeight); } catch (e) { slog('Frame error: ' + e.message, 'bad'); } }
@@ -1287,6 +1325,10 @@ async function scanVideoFile(f) {
 $('cam-start').addEventListener('click', () => startCamera().catch(e => slog(e.message, 'bad')));
 $('cam-stop').addEventListener('click', () => { scan.running = false; stopCamera(); });
 $('scan-reset').addEventListener('click', resetScan);
+$('save-frame').addEventListener('click', () => {
+  if (!scan.lastFrame) return;
+  work.toBlob(b => { if (b) saveBlob(b, `frame-${scan.lastFrame.w}x${scan.lastFrame.h}-${Date.now()}.png`); else slog('Could not export the frame.', 'bad'); }, 'image/png');
+});
 $('scan-files').addEventListener('change', e => { const files = [...e.target.files]; e.target.value = ''; scanFiles(files).catch(err => slog(err.message, 'bad')); });
 resetScan();
 

@@ -43,12 +43,14 @@ self-contained HTML file, in the browser, with nothing sent to any server.
   Default cell 0.0075 in (133 cells/in) → 12×16 tiles → ~115 KB payload/page.
 
 ## Scanner (PSV) in one paragraph
-Grayscale → summed-area table → local-mean threshold (radius min(w,h)/20,
+Grayscale → (frames ≥ 1500 px on the short side: probe at half resolution
+first; trust it only if ≥ 6 finders with median module ≥ 6 px, else redo at
+full) → summed-area table → local-mean threshold (radius min(w,h)/20,
 bias 8) → finders by 1:1:3:1:1 run ratios on each row, cross-checked on the
 column, the row again and one diagonal, merged over ≥2 rows → triples with
 two equal legs (ratio ≤ 1.3) at a right angle (|cos| ≤ 0.3), handedness picks
-TR vs BL → affine guess, search ±12 cells for the 5×5 mark (coarse then
-quarter-cell), homography from 4 points → fixed cells must match ≥ 75% →
+TR vs BL → affine guess, search ±12 cells for the 5×5 mark on the full-res
+gray (coarse then quarter-cell, plateau centroid), homography from 4 points → fixed cells must match ≥ 75% →
 sample 6400 cell centres (bilinear gray vs local mean, keeping each cell's
 margin) → the data cells with margin under 25% of the tile's mean margin
 (≤ 64, least sure first) go to PS.readTile as erasures → RS per codeword
@@ -78,6 +80,13 @@ marginal (soft focus, ink drops, scuffs) from rejected into repaired.
   (all → half → none) is strictly better because a failed attempt is cheap.
 - A random spread of N flipped cells is NOT a capacity test: 40 cells over 4
   words sometimes puts 17 in one word. Test capacity per codeword exactly.
+- First live phone test (1080p stream): blurry, nothing decoded. At 1080p a
+  tile needs the phone ~10 cm from the page, inside the lens's minimum focus
+  distance. Ask for the highest camera resolution so the phone can sit 20–30
+  cm away. Video frames are also softer than their pixel count suggests.
+- Half-resolution detection is only safe for cells ≥ ~4 px, and the 5×5
+  alignment mark must be searched on the full-res gray; its one-cell rings
+  vanish in a half-res binarization (lost 2 of 9 tiles at 45° before that fix).
 
 ## Testing rules
 - `node test/codec-stress.test.mjs`: randomized codec stress (loss, shuffle,
@@ -98,8 +107,9 @@ marginal (soft focus, ink drops, scuffs) from rejected into repaired.
   rolling shutter, motion blur or autofocus hunting.
 
 ## Roadmap
-1. Real fixtures: print a page, photograph and film it with a phone, put the
-   files in `fixtures/`, and make them pass. Expect to tune threshold radius,
+1. Real fixtures: print a page, photograph and film it with a phone, and use
+   the Decode tab's "Save this frame" button to capture what the scanner
+   actually sees; put the files in `fixtures/` and make them pass. Expect to tune threshold radius,
    bias, the 75% pattern gate and blur handling. Possibly use a higher
    resolution still capture instead of the video stream on phones.
 2. Density tuning against real prints (0.0075 → 0.005 in). With RS in place,

@@ -40,7 +40,7 @@ function scene(name, cols, rows, w, h, s, rot, key, extra, slack, opts) {
       const [tl, tr, bl] = [near(T[0]), near(T[1]), near(T[2])];
       let why = 'finders ' + [tl, tr, bl].map(f => f ? 'ok' : 'MISSING').join('/');
       if (tl && tr && bl) {
-        const al = PSV.findAlign(res.bin, w, h, tl, tr, bl), d = PSV.decodeTile(g, I, res.bin, w, h, r, 8, tl, tr, bl);
+        const al = PSV.findAlign(g, I, w, h, r, 8, tl, tr, bl), d = PSV.decodeTile(g, I, w, h, r, 8, tl, tr, bl);
         const off = al.picks.length ? Math.hypot(al.picks[0].x - T[3][0], al.picks[0].y - T[3][1]).toFixed(1) : 'none';
         why += `, mark score ${al.score} off by ${off} px, decodeTile -> ${d.ok ? 'OK' : d.reason + ' (fixed match ' + (d.match || 0).toFixed(2) + ')'}`;
         why += ', finder err px ' + [tl, tr, bl].map((f, i) => Math.hypot(f.x - T[i][0], f.y - T[i][1]).toFixed(2)).join('/');
@@ -52,6 +52,8 @@ function scene(name, cols, rows, w, h, s, rot, key, extra, slack, opts) {
 }
 
 scene('flat 5px', 3, 3, 1400, 1400, 5, 0, 0, {}, 0);
+scene('4K-ish 5px', 4, 3, 2400, 1700, 5, 0.1, 0.03, { blur: 1, noise: 3 }, 0);       // big frame: detection runs at half resolution
+scene('4K-ish 3px', 5, 4, 1800, 1500, 3, 0.1, 0.03, { blur: 1, noise: 3 }, 2);       // half-res detection at the low end
 scene('tilt 4px', 3, 3, 1300, 1300, 4, 0.2, 0.05, { blur: 1, shade: 0.25, noise: 4 }, 0);
 scene('45deg 4px', 3, 3, 1500, 1500, 4, Math.PI / 4, 0.03, { blur: 1, noise: 3 }, 1);   // finder ratios must survive a diagonal scan
 scene('180deg 4px', 2, 2, 900, 900, 4, Math.PI, 0.04, { blur: 1 }, 0);
