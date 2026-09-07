@@ -247,10 +247,16 @@
 // ring (data cells touching the ring hid about half the finders). Every other
 // cell is data, read in row-major order, XORed with a fixed pseudo-random mask.
 //
-// Data (768 bytes, 6144 bits, no spare bits):
+// Data (768 bytes, 6144 bits, no spare bits) = 4 interleaved Reed-Solomon
+// codewords of 192 bytes (160 message + 32 parity) over GF(256): byte j of the
+// tile belongs to codeword j mod 4, so bytes 0..639 are the message and
+// 640..767 the parity. Each codeword corrects 16 wrong bytes, or 32 bytes the
+// scanner flags as unsure, or a mix (2 * errors + unsure <= 32). Interleaving
+// spreads a smudge over all four words. The message is:
 //   header  20 bytes   magic 'PS', version, flags, fileId, K, blockLen, fileLen, tileIndex
-//   payload 744 bytes  one fountain-coded block
-//   crc32    4 bytes   over header + payload
+//   payload 616 bytes  one fountain-coded block
+//   crc32    4 bytes   over header + payload; the last word after RS, so a
+//                      miscorrection can never produce wrong output
 //
 // Fountain code: systematic, with dense random repair tiles. Tiles 0..K-1 carry
 // source blocks directly. Tiles >= K carry the XOR of a random half of the
@@ -279,7 +285,10 @@ const PS = (() => {
   const DATA_BITS = dataCells.length;        // 6144
   const fixedCells = [];                     // [cellIndex, value] for every reserved cell (scanner checks these)
   const DATA_BYTES = Math.floor(DATA_BITS / 8); // 768
-  const BLOCK_LEN = DATA_BYTES - HEADER_LEN - CRC_LEN; // 744
+  const RS_WORDS = 4, RS_N = DATA_BYTES / RS_WORDS; // 4 codewords of 192 bytes
+  const RS_PARITY = 32, RS_K = RS_N - RS_PARITY;    // 160 message bytes each
+  const MSG_BYTES = RS_WORDS * RS_K;                // 640
+  const BLOCK_LEN = MSG_BYTES - HEADER_LEN - CRC_LEN; // 616
 
   // ---- mask ----
   const mask = new Uint8Array(DATA_BITS);
@@ -309,6 +318,67 @@ const PS = (() => {
     let c = 0xFFFFFFFF; const len = end === undefined ? bytes.length : end;
     for (let i = 0; i < len; i++) c = crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
     return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  // ---- Reed-Solomon over GF(256), field polynomial 0x11D (the one QR uses) ----
+  // Polynomials are stored lowest degree first. Codeword byte k (k = 0 is the
+  // first message byte) is the coefficient of x^(n-1-k); its locator is
+  // X = alpha^(n-1-k). Generator roots are alpha^0 .. alpha^(RS_PARITY-1).
+  const GF_EXP = new Uint8Array(512), GF_LOG = new Uint8Array(256);
+  { let x = 1; for (let i = 0; i < 255; i++) { GF_EXP[i] = x; GF_LOG[x] = i; x <<= 1; if (x & 0x100) x ^= 0x11D; } for (let i = 255; i < 512; i++) GF_EXP[i] = GF_EXP[i - 255]; }
+  const gmul = (a, b) => a && b ? GF_EXP[GF_LOG[a] + GF_LOG[b]] : 0;
+  const gdiv = (a, b) => a ? GF_EXP[GF_LOG[a] + 255 - GF_LOG[b]] : 0; // b must be nonzero
+  const gpow = (a, e) => GF_EXP[(GF_LOG[a] * e) % 255];
+  function polyMul(p, q) { const r = new Uint8Array(p.length + q.length - 1); for (let i = 0; i < p.length; i++) if (p[i]) for (let j = 0; j < q.length; j++) r[i + j] ^= gmul(p[i], q[j]); return r; }
+  function polyEval(p, x) { let y = 0; for (let i = p.length - 1; i >= 0; i--) y = gmul(y, x) ^ p[i]; return y; }
+  // generator g(x) = prod (x - alpha^i), i < RS_PARITY; stored highest degree first for the division below
+  const RS_GEN = (() => { let g = new Uint8Array([1]); for (let i = 0; i < RS_PARITY; i++) g = polyMul(g, new Uint8Array([GF_EXP[i], 1])); return g.reverse(); })();
+  // Parity for msg: remainder of msg(x) * x^RS_PARITY divided by g(x).
+  function rsParity(msg) {
+    const buf = new Uint8Array(msg.length + RS_PARITY); buf.set(msg);
+    for (let i = 0; i < msg.length; i++) { const c = buf[i]; if (c) for (let j = 1; j < RS_GEN.length; j++) buf[i + j] ^= gmul(RS_GEN[j], c); }
+    return buf.subarray(msg.length);
+  }
+  // Correct cw (message followed by parity) in place. erasures: byte indices
+  // known to be unreliable. Returns the number of symbols changed, or -1 if
+  // the word is beyond repair. 2 * errors + erasures must be <= RS_PARITY.
+  function rsCorrect(cw, erasures) {
+    const n = cw.length, S = new Uint8Array(RS_PARITY); let clean = true;
+    for (let i = 0; i < RS_PARITY; i++) { let y = 0; for (let k = 0; k < n; k++) y = gmul(y, GF_EXP[i]) ^ cw[k]; S[i] = y; if (y) clean = false; }
+    if (clean) return 0;
+    const ers = erasures ? [...new Set(erasures)].filter(k => k >= 0 && k < n) : [];
+    if (ers.length > RS_PARITY) return -1;
+    // erasure locator G(x) = prod (1 - X_j x)
+    let G = new Uint8Array([1]);
+    for (const k of ers) G = polyMul(G, new Uint8Array([1, gpow(2, n - 1 - k)]));
+    // Forney syndromes T = S * G mod x^RS_PARITY, then drop the first |ers| terms
+    const SG = polyMul(S, G);
+    const T = []; for (let i = ers.length; i < RS_PARITY; i++) T.push(SG[i]);
+    // Berlekamp-Massey on T for the error locator L(x)
+    let C = [1], B = [1], L = 0, m = 1, b = 1;
+    for (let i = 0; i < T.length; i++) {
+      let d = T[i]; for (let j = 1; j <= L; j++) d ^= gmul(C[j] || 0, T[i - j]);
+      if (d === 0) { m++; continue; }
+      const coef = gdiv(d, b), Cprev = C.slice();
+      for (let j = 0; j < B.length; j++) C[j + m] = (C[j + m] || 0) ^ gmul(coef, B[j]);
+      if (2 * L <= i) { L = i + 1 - L; B = Cprev; b = d; m = 1; } else m++;
+    }
+    C.length = L + 1; for (let j = 0; j <= L; j++) C[j] = C[j] || 0;
+    if (2 * L + ers.length > RS_PARITY) return -1;
+    // errata locator P = L * G; find its roots by trying every position
+    const P = polyMul(new Uint8Array(C), G), pos = [];
+    for (let k = 0; k < n; k++) if (polyEval(P, gpow(2, (255 - (n - 1 - k) % 255) % 255)) === 0) pos.push(k);
+    if (pos.length !== P.length - 1) return -1;
+    // errata evaluator O = S * P mod x^RS_PARITY; formal derivative P'
+    const O = polyMul(S, P).subarray(0, RS_PARITY);
+    const Pd = new Uint8Array(Math.max(1, P.length - 1)); for (let i = 1; i < P.length; i += 2) Pd[i - 1] = P[i];
+    for (const k of pos) {
+      const X = gpow(2, n - 1 - k), Xi = gpow(2, (255 - (n - 1 - k) % 255) % 255);
+      const den = polyEval(Pd, Xi); if (!den) return -1;
+      cw[k] ^= gmul(X, gdiv(polyEval(O, Xi), den));
+    }
+    for (let i = 0; i < RS_PARITY; i++) { let y = 0; for (let k = 0; k < n; k++) y = gmul(y, GF_EXP[i]) ^ cw[k]; if (y) return -1; }
+    return pos.length;
   }
 
   // ---- prng ----
@@ -390,6 +460,12 @@ const PS = (() => {
       for (const bi of tileBlocks(fileId, t, K)) { const src = blocks[bi]; for (let i = 0; i < BLOCK_LEN; i++) payload[i] ^= src[i]; }
       const crc = crc32(out, HEADER_LEN + BLOCK_LEN);
       new DataView(out.buffer).setUint32(HEADER_LEN + BLOCK_LEN, crc);
+      const msg = new Uint8Array(RS_K);
+      for (let c = 0; c < RS_WORDS; c++) {
+        for (let i = 0; i < RS_K; i++) msg[i] = out[RS_WORDS * i + c];
+        const par = rsParity(msg);
+        for (let i = 0; i < RS_PARITY; i++) out[MSG_BYTES + RS_WORDS * i + c] = par[i];
+      }
       return out;
     }
     function tile(t) {
@@ -405,15 +481,41 @@ const PS = (() => {
     return { K, fileId, fileLen, blocks, tile, tileBytes };
   }
 
-  // ---- tile reader: 80x80 cell matrix -> {header, payload} or null ----
-  function readTile(m) {
+  // ---- tile reader: 80x80 cell matrix -> {header, payload, corrected} or null ----
+  // weak: optional list of cell indices the sampler is unsure about, least
+  // sure first. Their bytes become erasures, which cost half what an error
+  // does. If a codeword will not decode with all of them (the list may flag
+  // cells that were fine), it is retried with the surest half dropped, then
+  // with none.
+  const cellByte = new Int16Array(TILE * TILE).fill(-1);
+  for (let i = 0; i < DATA_BYTES * 8; i++) cellByte[dataCells[i]] = i >> 3;
+  function readTile(m, weak) {
     const bytes = new Uint8Array(DATA_BYTES);
     for (let i = 0; i < DATA_BYTES * 8; i++) { const bit = (m[dataCells[i]] ^ mask[i]) & 1; if (bit) bytes[i >> 3] |= 0x80 >> (i & 7); }
+    const erasures = Array.from({ length: RS_WORDS }, () => []);
+    if (weak) for (const cell of weak) {
+      const b = cellByte[cell]; if (b < 0) continue;
+      const list = erasures[b % RS_WORDS], pos = (b / RS_WORDS) | 0;
+      if (list.length < RS_PARITY && !list.includes(pos)) list.push(pos);
+    }
+    let corrected = 0; const cw = new Uint8Array(RS_N);
+    for (let c = 0; c < RS_WORDS; c++) {
+      for (let i = 0; i < RS_N; i++) cw[i] = bytes[RS_WORDS * i + c];
+      let r = -1;
+      for (const take of [erasures[c].length, erasures[c].length >> 1, 0]) {
+        for (let i = 0; i < RS_N; i++) cw[i] = bytes[RS_WORDS * i + c];
+        r = rsCorrect(cw, erasures[c].slice(0, take));
+        if (r >= 0 || take === 0) break;
+      }
+      if (r < 0) return null;
+      corrected += r;
+      for (let i = 0; i < RS_K; i++) bytes[RS_WORDS * i + c] = cw[i];
+    }
     const header = unpackHeader(bytes.subarray(0, HEADER_LEN));
     if (!header) return null;
     const crc = new DataView(bytes.buffer).getUint32(HEADER_LEN + BLOCK_LEN);
     if (crc !== crc32(bytes, HEADER_LEN + BLOCK_LEN)) return null;
-    return { header, payload: bytes.slice(HEADER_LEN, HEADER_LEN + BLOCK_LEN) };
+    return { header, payload: bytes.slice(HEADER_LEN, HEADER_LEN + BLOCK_LEN), corrected };
   }
 
   // ---- fountain decoder ----
@@ -495,7 +597,7 @@ const PS = (() => {
 
   for (let i = 0; i < TILE * TILE; i++) if (reserved[i]) fixedCells.push([i, fixedCell(i % TILE, (i / TILE) | 0)]);
 
-  return { TILE, BLOCK_LEN, DATA_BYTES, FLAG_GZIP, fixedCells, makeEncoder, readTile, makeDecoder, packContainer, unpackContainer, tileBlocks, crc32 };
+  return { TILE, BLOCK_LEN, DATA_BYTES, MSG_BYTES, RS_WORDS, RS_N, RS_PARITY, FLAG_GZIP, fixedCells, dataCells, makeEncoder, readTile, makeDecoder, packContainer, unpackContainer, tileBlocks, crc32, rsParity, rsCorrect };
 })();
 // ==== CODEC END ====
 </script>
@@ -710,33 +812,39 @@ const PSV = (() => {
     return { picks, predicted: [px, py], score: picks.length ? picks[0].score : 0 };
   }
 
-  // Bilinear gray at a continuous point against the local mean. -1 = outside.
+  // Bilinear gray at a continuous point minus the local threshold: positive
+  // means ink, and the magnitude is how sure the call is. NaN = outside.
   function sampleCell(g, I, w, h, x, y, r, bias) {
     const u = x - 0.5, v = y - 0.5, x0 = Math.floor(u), y0 = Math.floor(v);
-    if (x0 < 0 || y0 < 0 || x0 + 1 >= w || y0 + 1 >= h) return -1;
+    if (x0 < 0 || y0 < 0 || x0 + 1 >= w || y0 + 1 >= h) return NaN;
     const fx = u - x0, fy = v - y0, o = y0 * w + x0;
     const val = g[o] * (1 - fx) * (1 - fy) + g[o + 1] * fx * (1 - fy) + g[o + w] * (1 - fx) * fy + g[o + w + 1] * fx * fy;
-    return val < meanAt(I, w, h, x0, y0, r) - bias ? 1 : 0;
+    return meanAt(I, w, h, x0, y0, r) - bias - val;
   }
 
+  const WEAK_FRACTION = 0.25, WEAK_MAX = 64; // cells with margin under a quarter of the tile's typical margin are handed to RS as erasures
   function readWith(g, I, w, h, r, bias, H) {
     let match = 0, seen = 0;
     for (const [idx, v] of PS.fixedCells) {
       const [px, py] = project(H, (idx % TILE) + 0.5, ((idx / TILE) | 0) + 0.5);
       const s = sampleCell(g, I, w, h, px, py, r, bias);
-      if (s < 0) return { reason: 'edge' };
-      seen++; if (s === v) match++;
+      if (s !== s) return { reason: 'edge' };
+      seen++; if ((s > 0 ? 1 : 0) === v) match++;
     }
     if (match / seen < 0.75) return { reason: 'pattern', match: match / seen }; // random data scores ~0.5; blurry real tiles reach 0.8
-    const m = new Uint8Array(TILE * TILE);
+    const m = new Uint8Array(TILE * TILE), margin = new Float32Array(TILE * TILE);
+    let sum = 0;
     for (let y = 0; y < TILE; y++) for (let x = 0; x < TILE; x++) {
       const [px, py] = project(H, x + 0.5, y + 0.5);
       const s = sampleCell(g, I, w, h, px, py, r, bias);
-      if (s < 0) return { reason: 'edge' };
-      m[y * TILE + x] = s;
+      if (s !== s) return { reason: 'edge' };
+      m[y * TILE + x] = s > 0 ? 1 : 0; margin[y * TILE + x] = Math.abs(s); sum += Math.abs(s);
     }
-    const tile = PS.readTile(m);
-    return tile ? { tile, match: match / seen } : { reason: 'crc', match: match / seen };
+    const cut = WEAK_FRACTION * sum / (TILE * TILE), weak = [];
+    for (const i of PS.dataCells) if (margin[i] < cut) weak.push(i);
+    weak.sort((a, b) => margin[a] - margin[b]); weak.length = Math.min(weak.length, WEAK_MAX);
+    const tile = PS.readTile(m, weak);
+    return tile ? { tile, match: match / seen, weak: weak.length } : { reason: 'crc', match: match / seen, weak: weak.length };
   }
 
   function decodeTile(g, I, bin, w, h, r, bias, tl, tr, bl) {
@@ -1026,7 +1134,7 @@ function updateScanStats(res) {
   ];
   const s = $('scan-stats'); s.innerHTML = '';
   for (const [k, v] of rows) { const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); dd.textContent = v; s.append(dt, dd); }
-  if (res) $('readout').textContent = `${res.finders.length} finders · ${res.tiles.filter(t => t.ok).length} tiles read · ${res.tiles.filter(t => !t.ok).length} rejected · focus ${res.focus.toFixed(0)} · ${res.ms} ms`;
+  if (res) { const ok = res.tiles.filter(t => t.ok), fixed = ok.reduce((a, t) => a + t.tile.corrected, 0); $('readout').textContent = `${res.finders.length} finders · ${ok.length} tiles read · ${res.tiles.filter(t => !t.ok).length} rejected · ${fixed} bytes repaired · focus ${res.focus.toFixed(0)} · ${res.ms} ms`; }
 }
 function drawOverlay(source, w, h, res) {
   if (view.width !== w || view.height !== h) { view.width = w; view.height = h; }
@@ -1139,7 +1247,8 @@ async function scanPhoto(f) {
   const w = Math.round(bmp.width * k), h = Math.round(bmp.height * k);
   const res = processFrame(bmp, w, h);
   bmp.close && bmp.close();
-  slog(`${f.name}: ${res.finders.length} finders, ${res.tiles.filter(t => t.ok).length} tiles read, ${res.tiles.filter(t => !t.ok).length} rejected`);
+  const okT = res.tiles.filter(t => t.ok);
+  slog(`${f.name}: ${res.finders.length} finders, ${okT.length} tiles read (${okT.reduce((a, t) => a + t.tile.corrected, 0)} bytes repaired), ${res.tiles.filter(t => !t.ok).length} rejected`);
   await new Promise(r => setTimeout(r, 0));
 }
 async function scanVideoFile(f) {

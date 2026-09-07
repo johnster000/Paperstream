@@ -25,16 +25,22 @@ self-contained HTML file, in the browser, with nothing sent to any server.
   alignment mark (BR, cells 73..77, centre 75.5). Each sits inside a reserved
   8×8 corner block, so a one-cell white separator surrounds it. All other
   cells are data, row-major, XORed with a fixed xorshift32 mask (seed 0x9E3779B9).
-- Data per tile: 768 bytes = 20-byte header + 744-byte block + CRC32. No spare bits.
+- Data per tile: 768 bytes = 4 interleaved Reed-Solomon codewords of 192 bytes
+  (160 message + 32 parity) over GF(256), field polynomial 0x11D, generator
+  roots α^0..α^31, first byte = highest-degree coefficient (the QR conventions).
+  Tile byte j belongs to codeword j mod 4: bytes 0..639 are the message,
+  640..767 the parity. Each word fixes 16 errors, or 32 erasures, or 2e+s ≤ 32.
+- Message (640 bytes) = 20-byte header + 616-byte block + CRC32 over both.
+  CRC is checked AFTER RS, so a miscorrection can never yield wrong output.
   Header (big-endian): 'P','S', version u8=0, flags u8 (bit0 = gzip),
-  fileId u32, K u16, blockLen u16 (=744), fileLen u32, tileIndex u32.
-- Container: [u16 nameLen][utf8 name][gzip data]. Split into K blocks of 744.
+  fileId u32, K u16, blockLen u16 (=616), fileLen u32, tileIndex u32.
+- Container: [u16 nameLen][utf8 name][gzip data]. Split into K blocks of 616.
 - Fountain code: systematic. Tile t < K carries block t. Tile t ≥ K is the
   XOR of a random half of all blocks, chosen by mulberry32 seeded from
   mix32(fileId, t). Decoder: peel, then Gaussian elimination over GF(2).
   Any K + ~8 distinct tiles rebuild the file (failure ≈ 2^-surplus).
 - Page: letter or A4, 0.35 in margins, 0.32 in text header, 2-cell gutters.
-  Default cell 0.0075 in (133 cells/in) → 12×16 tiles → ~139 KB payload/page.
+  Default cell 0.0075 in (133 cells/in) → 12×16 tiles → ~115 KB payload/page.
 
 ## Scanner (PSV) in one paragraph
 Grayscale → summed-area table → local-mean threshold (radius min(w,h)/20,
@@ -43,8 +49,12 @@ column, the row again and one diagonal, merged over ≥2 rows → triples with
 two equal legs (ratio ≤ 1.3) at a right angle (|cos| ≤ 0.3), handedness picks
 TR vs BL → affine guess, search ±12 cells for the 5×5 mark (coarse then
 quarter-cell), homography from 4 points → fixed cells must match ≥ 75% →
-sample 6400 cell centres (bilinear gray vs local mean) → PS.readTile; CRC
-decides. Works at any rotation. Needs ≥ ~2.5 px per cell; 3+ is comfortable.
+sample 6400 cell centres (bilinear gray vs local mean, keeping each cell's
+margin) → the data cells with margin under 25% of the tile's mean margin
+(≤ 64, least sure first) go to PS.readTile as erasures → RS per codeword
+(all erasures, then half, then none) → CRC decides. Works at any rotation.
+Needs ≥ ~2.5 px per cell; 3+ is comfortable. RS turns tiles that were
+marginal (soft focus, ink drops, scuffs) from rejected into repaired.
 
 ## Lessons already learned (do not relearn)
 - Sparse LT / robust-soliton repair tiles FAIL on coverage when only a few
@@ -63,14 +73,22 @@ decides. Works at any rotation. Needs ≥ ~2.5 px per cell; 3+ is comfortable.
   affine prediction and the two legs differ by 20%. Search wide; CRC is cheap.
 - `hidden` on a section with a `display:flex` class rule does nothing without
   `[hidden] { display: none !important }`.
+- RS erasures: capping at 16 per word wasted half the capacity when the
+  scanner's unsure list was right; trusting the whole list and falling back
+  (all → half → none) is strictly better because a failed attempt is cheap.
+- A random spread of N flipped cells is NOT a capacity test: 40 cells over 4
+  words sometimes puts 17 in one word. Test capacity per codeword exactly.
 
 ## Testing rules
 - `node test/codec-stress.test.mjs`: randomized codec stress (loss, shuffle,
-  exact K+3 / K+10 surplus, CRC rejection). Run after ANY codec change. Zero
-  wrong outputs is the bar; rank-failure at K+3 should be ~10%, at K+10 ~0.1%.
+  exact K+3 / K+10 surplus, RS repair exactly at capacity and rejection just
+  beyond it, erasures). Run after ANY codec change. Zero wrong outputs is the
+  bar; rank-failure at K+3 should be ~10%, at K+10 ~0.1%.
 - `node test/vision-synthetic.test.mjs`: renders tiles through perspective,
-  rotation, blur, shading, noise, low contrast and cropping, runs PSV, and
-  rebuilds a file from a multi-frame sweep. Run after ANY vision change.
+  rotation, blur, shading, noise, low contrast, cropping, soft focus and ink
+  blots, runs PSV, prints bytes repaired per scene, and rebuilds a file from
+  a multi-frame sweep. Run after ANY vision change. DEBUG=1 prints why each
+  visible tile missed; SEED=n changes the data and poses.
 - `NODE_PATH=$(npm root -g) node test/browser.test.mjs`: Playwright + Chromium.
   Encodes the sample, runs both verifiers, then pushes a rotated blurred
   rasterized "photo" through the Decode tab's file input. Set SHOTS=dir for screenshots.
@@ -84,9 +102,10 @@ decides. Works at any rotation. Needs ≥ ~2.5 px per cell; 3+ is comfortable.
    files in `fixtures/`, and make them pass. Expect to tune threshold radius,
    bias, the 75% pattern gate and blur handling. Possibly use a higher
    resolution still capture instead of the video stream on phones.
-2. Reed-Solomon inside tiles so a single bad cell doesn't discard a tile.
-3. Density tuning against real prints (0.0075 → 0.005 in).
-4. Print the decoder's own source on the last pages (self-decoding backup).
-5. Write the format spec as a standalone document.
-6. Performance: live frames are processed on the main thread (~60–100 ms at
+2. Density tuning against real prints (0.0075 → 0.005 in). With RS in place,
+   the 'bytes repaired' readout on the Decode tab shows how much margin a
+   print has left at a given density.
+3. Print the decoder's own source on the last pages (self-decoding backup).
+4. Write the format spec as a standalone document.
+5. Performance: live frames are processed on the main thread (~60–100 ms at
    1080p). A Worker built from an inline Blob would keep the UI smooth.

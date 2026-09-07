@@ -41,8 +41,10 @@ export function render(enc, first, cols, rows, w, h, p) {
   const Hinv = PSV.homography(p.quad, [[0, 0], [pw, 0], [pw, ph], [0, ph]]); // image -> page cells
   const ink = p.ink === undefined ? 25 : p.ink, paper = p.paper === undefined ? 225 : p.paper;
   const SS = 2, img = new Float32Array(w * h);
+  const blots = p.blots || []; // [{x, y, r, v}] in page cells: ink drops (v = 1) or white scuffs (v = 0)
   const cellAt = (cx, cy) => {
     if (cx < 0 || cy < 0 || cx >= pw || cy >= ph) return p.background === undefined ? 0.5 : p.background; // desk
+    for (const b of blots) { const dx = cx - b.x, dy = cy - b.y; if (dx * dx + dy * dy < b.r * b.r) return b.v; }
     const gx = cx - GUTTER, gy = cy - GUTTER; if (gx < 0 || gy < 0) return 0;
     const c = Math.floor(gx / PITCH), r = Math.floor(gy / PITCH); if (c >= cols || r >= rows) return 0;
     const x = Math.floor(gx - c * PITCH), y = Math.floor(gy - r * PITCH); if (x >= PS.TILE || y >= PS.TILE) return 0;

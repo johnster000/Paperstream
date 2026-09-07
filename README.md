@@ -12,6 +12,8 @@ in a browser.
 - Decode tab: Start camera and sweep over the printed pages in any order,
   or choose photos / a video of the pages. Green outlines are tiles that
   decoded, red ones failed their checksum (move closer or hold steadier).
+  Each tile carries Reed-Solomon parity, so smudges, scuffs and soft focus
+  are repaired rather than fatal; the readout shows how many bytes were fixed.
   The bar fills as blocks are recovered; when it completes you can save the file.
 
 The scanner has so far only been tested against synthetic renders and
