@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paperstream, prototype encoder</title>
+<style>
+  :root {
+    --desk: #E8E8E4;
+    --paper: #FFFFFF;
+    --ink: #000000;
+    --blue: #2B5FD9;
+    --blue-dark: #1F47A6;
+    --rule: #CFCFC9;
+    --muted: #62625C;
+    --ok: #1E7F4F;
+    --bad: #B3261E;
+    font-family: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--ink);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--desk); }
+
+  header.top {
+    background: var(--paper);
+    border-bottom: 1px solid var(--rule);
+    padding: 14px 20px;
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header.top h1 { font-size: 20px; font-weight: 500; margin: 0; letter-spacing: -0.01em; }
+  header.top p { margin: 0; color: var(--muted); }
+
+  .app { display: grid; grid-template-columns: 320px 1fr; min-height: calc(100vh - 52px); }
+  @media (max-width: 820px) { .app { grid-template-columns: 1fr; } }
+
+  aside.controls {
+    background: var(--paper);
+    border-right: 1px solid var(--rule);
+    padding: 18px 20px 28px;
+  }
+  @media (max-width: 820px) { aside.controls { border-right: 0; border-bottom: 1px solid var(--rule); } }
+
+  .drop {
+    display: block;
+    border: 1px dashed #9A9A94;
+    padding: 18px 14px;
+    text-align: left;
+    cursor: pointer;
+    background: var(--paper);
+  }
+  .drop.over { border-color: var(--blue); background: #F3F6FD; }
+  .drop strong { font-weight: 500; }
+  .drop small { color: var(--muted); display: block; margin-top: 4px; }
+  .drop input { display: block; margin-top: 10px; font: inherit; max-width: 100%; }
+  .alt { margin-top: 12px; }
+  .alt summary { cursor: pointer; color: var(--muted); }
+  .alt textarea { display: block; width: 100%; margin-top: 8px; font: inherit; padding: 6px; border: 1px solid var(--rule); }
+  .alt .actions { margin-top: 8px; }
+  .filename { margin: 10px 0 0; word-break: break-all; }
+  .filename span { color: var(--muted); }
+
+  fieldset { border: 0; padding: 0; margin: 20px 0 0; }
+  fieldset legend { padding: 0; font-weight: 500; margin-bottom: 8px; }
+  .row { display: grid; grid-template-columns: auto 1fr; justify-items: end; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid var(--rule); }
+  .row:last-child { border-bottom: 1px solid var(--rule); }
+  .row label { color: var(--ink); }
+  .row select, .row input[type=number] {
+    font: inherit; padding: 4px 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); min-width: 120px;
+  }
+  .row select:focus, .row input:focus, button:focus-visible, .drop:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  button {
+    font: inherit; padding: 8px 14px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); cursor: pointer;
+  }
+  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  button.primary:hover { background: var(--blue-dark); border-color: var(--blue-dark); }
+  button:disabled { opacity: .4; cursor: default; }
+
+  dl.stats { margin: 18px 0 0; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; }
+  dl.stats dt { color: var(--muted); }
+  dl.stats dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+
+  .log { margin-top: 18px; font-size: 13px; }
+  .log p { margin: 4px 0; }
+  .log .ok { color: var(--ok); }
+  .log .bad { color: var(--bad); }
+  .log a { color: var(--blue); }
+
+  section.pages { padding: 24px; display: flex; flex-direction: column; gap: 24px; align-items: center; }
+  section.pages .empty { color: var(--muted); max-width: 46ch; align-self: flex-start; }
+  section.pages svg { width: min(100%, 720px); height: auto; background: var(--paper); border: 1px solid var(--rule); display: block; }
+
+  @media print {
+    header.top, aside.controls { display: none !important; }
+    html, body { background: #fff; }
+    .app { display: block; min-height: 0; }
+    section.pages { padding: 0; gap: 0; display: block; }
+    section.pages .empty { display: none; }
+    section.pages svg { width: var(--page-w); height: var(--page-h); border: 0; page-break-after: always; break-after: page; }
+    section.pages svg:last-child { page-break-after: auto; break-after: auto; }
+  }
+</style>
+<style id="pagesize">@page { size: letter; margin: 0; }</style>
+</head>
+<body>
+
+<header class="top">
+  <h1>Paperstream</h1>
+  <p>Prototype encoder. Turns a file into pages of fountain-coded tiles and checks they decode.</p>
+</header>
+
+<div class="app">
+  <aside class="controls">
+    <div class="drop" id="drop">
+      <strong>Pick a file</strong>
+      <small>Everything stays in this tab. Drag a file here on desktop.</small>
+      <input type="file" id="file">
+    </div>
+    <p class="filename" id="filename"><span>No file yet</span></p>
+    <details class="alt">
+      <summary>No file handy? Paste text or use a sample</summary>
+      <textarea id="paste" rows="4" placeholder="Paste any text here"></textarea>
+      <div class="actions">
+        <button id="use-paste">Use pasted text</button>
+        <button id="use-sample">Use 150 KB sample</button>
+      </div>
+    </details>
+
+    <fieldset>
+      <legend>Print settings</legend>
+      <div class="row">
+        <label for="pagesize-sel">Paper</label>
+        <select id="pagesize-sel">
+          <option value="letter">Letter, 8.5 × 11 in</option>
+          <option value="a4">A4, 210 × 297 mm</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="cell">Cell size</label>
+        <select id="cell">
+          <option value="0.0100">0.010 in, 100 cells/in, safest</option>
+          <option value="0.0075" selected>0.0075 in, 133 cells/in</option>
+          <option value="0.0065">0.0065 in, 154 cells/in</option>
+          <option value="0.0050">0.005 in, 200 cells/in, needs 600 dpi</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="redundancy">Extra tiles</label>
+        <input type="number" id="redundancy" min="0" max="300" step="5" value="25"> 
+      </div>
+    </fieldset>
+
+    <div class="actions">
+      <button class="primary" id="encode" disabled>Encode</button>
+      <button id="print" disabled>Print pages</button>
+      <button id="verify" disabled>Verify roundtrip</button>
+    </div>
+
+    <dl class="stats" id="stats" hidden></dl>
+    <div class="log" id="log"></div>
+  </aside>
+
+  <section class="pages" id="pages">
+    <p class="empty">Pick a file and press Encode. The pages appear here and print one per sheet. Verify rasterizes the pages, reads every tile back from pixels, and rebuilds the file. Camera decoding is the next step and isn't in this build.</p>
+  </section>
+</div>
+
+<script>
+// ==== CODEC BEGIN ====
+// Paperstream v0 tile format (prototype). Pure functions, no DOM.
+//
+// Tile: 80 x 80 cells. Three 7x7 finder patterns (top-left, top-right,
+// bottom-left) and one 5x5 alignment mark (bottom-right), like QR, so a
+// tile's orientation is unambiguous. Every other cell is data, read in
+// row-major order, XORed with a fixed pseudo-random mask.
+//
+// Data (778 bytes, 6228 bits, 4 spare bits):
+//   header  20 bytes   magic 'PS', version, flags, fileId, K, blockLen, fileLen, tileIndex
+//   payload 754 bytes  one fountain-coded block
+//   crc32    4 bytes   over header + payload
+//
+// Fountain code: systematic, with dense random repair tiles. Tiles 0..K-1 carry
+// source blocks directly. Tiles >= K carry the XOR of a random half of the
+// blocks, chosen by a PRNG seeded from (fileId, tileIndex). Any tile is
+// decodable alone; the decoder peels what it can, then finishes with Gaussian
+// elimination over GF(2).
+
+const PS = (() => {
+  const TILE = 80;
+  const FINDER = 7, ALIGN = 5;
+  const HEADER_LEN = 20, CRC_LEN = 4;
+  const MAGIC0 = 0x50, MAGIC1 = 0x53; // 'P','S'
+  const VERSION = 0;
+  const FLAG_GZIP = 1;
+
+  // ---- cell map ----
+  const reserved = new Uint8Array(TILE * TILE);
+  function markSquare(x0, y0, n) { for (let y = y0; y < y0 + n; y++) for (let x = x0; x < x0 + n; x++) reserved[y * TILE + x] = 1; }
+  markSquare(0, 0, FINDER);
+  markSquare(TILE - FINDER, 0, FINDER);
+  markSquare(0, TILE - FINDER, FINDER);
+  const ALIGN0 = TILE - FINDER;              // 73
+  markSquare(ALIGN0, ALIGN0, ALIGN);         // 73..77
+  const dataCells = [];
+  for (let i = 0; i < TILE * TILE; i++) if (!reserved[i]) dataCells.push(i);
+  const DATA_BITS = dataCells.length;        // 6228
+  const DATA_BYTES = Math.floor(DATA_BITS / 8); // 778
+  const BLOCK_LEN = DATA_BYTES - HEADER_LEN - CRC_LEN; // 754
+
+  // ---- mask ----
+  const mask = new Uint8Array(DATA_BITS);
+  { let s = 0x9E3779B9; for (let i = 0; i < DATA_BITS; i++) { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; mask[i] = s & 1; } } // xorshift is fine here: it's only a mask
+
+  // ---- fixed patterns ----
+  function finderCell(dx, dy) { // 7x7
+    const ring = Math.max(Math.abs(dx - 3), Math.abs(dy - 3));
+    return ring === 3 || ring <= 1 ? 1 : 0;
+  }
+  function alignCell(dx, dy) { // 5x5
+    const ring = Math.max(Math.abs(dx - 2), Math.abs(dy - 2));
+    return ring === 2 || ring === 0 ? 1 : 0;
+  }
+  function fixedCell(x, y) {
+    if (x < FINDER && y < FINDER) return finderCell(x, y);
+    if (x >= TILE - FINDER && y < FINDER) return finderCell(x - (TILE - FINDER), y);
+    if (x < FINDER && y >= TILE - FINDER) return finderCell(x, y - (TILE - FINDER));
+    if (x >= ALIGN0 && x < ALIGN0 + ALIGN && y >= ALIGN0 && y < ALIGN0 + ALIGN) return alignCell(x - ALIGN0, y - ALIGN0);
+    return 0; // reserved but unused corner cells stay white
+  }
+
+  // ---- crc32 ----
+  const crcTable = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; crcTable[n] = c >>> 0; }
+  function crc32(bytes, end) {
+    let c = 0xFFFFFFFF; const len = end === undefined ? bytes.length : end;
+    for (let i = 0; i < len; i++) c = crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  // ---- prng ----
+  function mix32(a, b) {
+    let h = (a ^ Math.imul(b, 0x9E3779B1)) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 0x45D9F3B) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 0x45D9F3B) >>> 0;
+    h = (h ^ (h >>> 16)) >>> 0;
+    return h || 1;
+  }
+  // mulberry32: uses multiplication, so its output is NOT linear over GF(2).
+  // (xorshift is linear, which makes dense rows span at most 32 dimensions.)
+  function prng(seed) {
+    let s = seed >>> 0;
+    return () => {
+      s = (s + 0x6D2B79F5) >>> 0;
+      let t = Math.imul(s ^ (s >>> 15), 1 | s);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return (t ^ (t >>> 14)) >>> 0;
+    };
+  }
+
+  // Which source blocks does tile t combine? Deterministic from (fileId, t, K).
+  // Tiles 0..K-1 carry source blocks directly. Every repair tile is "dense":
+  // each source block is included with probability 1/2. Dense rows are almost
+  // surely independent, so any K + 2 or 3 distinct tiles rebuild the file,
+  // with no dependence on which ones were lost. (A sparse LT distribution was
+  // tried first: it fails on coverage when only a few repair tiles survive.)
+  function tileBlocks(fileId, t, K) {
+    if (t < K) return [t];
+    const rnd = prng(mix32(fileId, t));
+    const out = []; let bits = 0, left = 0;
+    for (let b = 0; b < K; b++) { if (left === 0) { bits = rnd(); left = 32; } if (bits & 1) out.push(b); bits >>>= 1; left--; }
+    if (out.length === 0) out.push(rnd() % K);
+    return out;
+  }
+
+  // ---- header ----
+  function packHeader(h) {
+    const b = new Uint8Array(HEADER_LEN); const v = new DataView(b.buffer);
+    b[0] = MAGIC0; b[1] = MAGIC1; b[2] = VERSION; b[3] = h.flags;
+    v.setUint32(4, h.fileId); v.setUint16(8, h.K); v.setUint16(10, BLOCK_LEN); v.setUint32(12, h.fileLen); v.setUint32(16, h.tileIndex);
+    return b;
+  }
+  function unpackHeader(b) {
+    if (b[0] !== MAGIC0 || b[1] !== MAGIC1 || b[2] !== VERSION) return null;
+    const v = new DataView(b.buffer, b.byteOffset);
+    if (v.getUint16(10) !== BLOCK_LEN) return null;
+    return { flags: b[3], fileId: v.getUint32(4), K: v.getUint16(8), fileLen: v.getUint32(12), tileIndex: v.getUint32(16) };
+  }
+
+  // ---- container: [u16 nameLen][name][data] ----
+  function packContainer(name, data) {
+    const nameBytes = new TextEncoder().encode(name).slice(0, 65535);
+    const out = new Uint8Array(2 + nameBytes.length + data.length);
+    out[0] = nameBytes.length >> 8; out[1] = nameBytes.length & 255;
+    out.set(nameBytes, 2); out.set(data, 2 + nameBytes.length);
+    return out;
+  }
+  function unpackContainer(bytes) {
+    const n = (bytes[0] << 8) | bytes[1];
+    return { name: new TextDecoder().decode(bytes.subarray(2, 2 + n)), data: bytes.subarray(2 + n) };
+  }
+
+  // ---- encoder ----
+  // Returns { K, fileId, blocks, tile(t) -> 80x80 Uint8Array (1=black) }
+  function makeEncoder(container, flags) {
+    const fileLen = container.length;
+    const K = Math.max(1, Math.ceil(fileLen / BLOCK_LEN));
+    if (K > 65535) throw new Error('File too large for v0: more than 65535 blocks');
+    const fileId = (Math.random() * 4294967296) >>> 0;
+    const blocks = [];
+    for (let i = 0; i < K; i++) { const b = new Uint8Array(BLOCK_LEN); b.set(container.subarray(i * BLOCK_LEN, Math.min(fileLen, (i + 1) * BLOCK_LEN))); blocks.push(b); }
+
+    function tileBytes(t) {
+      const out = new Uint8Array(DATA_BYTES);
+      out.set(packHeader({ flags, fileId, K, fileLen, tileIndex: t }), 0);
+      const payload = out.subarray(HEADER_LEN, HEADER_LEN + BLOCK_LEN);
+      for (const bi of tileBlocks(fileId, t, K)) { const src = blocks[bi]; for (let i = 0; i < BLOCK_LEN; i++) payload[i] ^= src[i]; }
+      const crc = crc32(out, HEADER_LEN + BLOCK_LEN);
+      new DataView(out.buffer).setUint32(HEADER_LEN + BLOCK_LEN, crc);
+      return out;
+    }
+    function tile(t) {
+      const bytes = tileBytes(t);
+      const m = new Uint8Array(TILE * TILE);
+      for (let y = 0; y < TILE; y++) for (let x = 0; x < TILE; x++) if (reserved[y * TILE + x]) m[y * TILE + x] = fixedCell(x, y);
+      for (let i = 0; i < DATA_BITS; i++) {
+        const bit = i < DATA_BYTES * 8 ? (bytes[i >> 3] >> (7 - (i & 7))) & 1 : 0;
+        m[dataCells[i]] = bit ^ mask[i];
+      }
+      return m;
+    }
+    return { K, fileId, fileLen, blocks, tile, tileBytes };
+  }
+
+  // ---- tile reader: 80x80 cell matrix -> {header, payload} or null ----
+  function readTile(m) {
+    const bytes = new Uint8Array(DATA_BYTES);
+    for (let i = 0; i < DATA_BYTES * 8; i++) { const bit = (m[dataCells[i]] ^ mask[i]) & 1; if (bit) bytes[i >> 3] |= 0x80 >> (i & 7); }
+    const header = unpackHeader(bytes.subarray(0, HEADER_LEN));
+    if (!header) return null;
+    const crc = new DataView(bytes.buffer).getUint32(HEADER_LEN + BLOCK_LEN);
+    if (crc !== crc32(bytes, HEADER_LEN + BLOCK_LEN)) return null;
+    return { header, payload: bytes.slice(HEADER_LEN, HEADER_LEN + BLOCK_LEN) };
+  }
+
+  // ---- fountain decoder ----
+  function makeDecoder() {
+    let meta = null;               // {fileId, K, fileLen, flags}
+    const seen = new Set();        // tileIndex
+    const solved = new Map();      // blockIndex -> Uint8Array
+    let pending = [];              // [{idx:Set<number>, data:Uint8Array}]
+    let done = false;
+
+    function xorInto(dst, src) { for (let i = 0; i < BLOCK_LEN; i++) dst[i] ^= src[i]; }
+
+    function addEquation(idx, data) {
+      const rest = new Set();
+      for (const b of idx) { if (solved.has(b)) xorInto(data, solved.get(b)); else rest.add(b); }
+      if (rest.size === 0) return;
+      if (rest.size === 1) { solve([...rest][0], data); return; }
+      pending.push({ idx: rest, data });
+    }
+    function solve(b, data) {
+      if (solved.has(b)) return;
+      solved.set(b, data);
+      // substitute into pending equations
+      const next = [];
+      const newlySolved = [];
+      for (const eq of pending) {
+        if (eq.idx.has(b)) { eq.idx.delete(b); xorInto(eq.data, data); }
+        if (eq.idx.size === 0) continue;
+        if (eq.idx.size === 1) { newlySolved.push(eq); continue; }
+        next.push(eq);
+      }
+      pending = next;
+      for (const eq of newlySolved) solve([...eq.idx][0], eq.data);
+    }
+
+    function accept(tile) {
+      if (done) return { accepted: false, reason: 'done' };
+      const h = tile.header;
+      if (!meta) meta = { fileId: h.fileId, K: h.K, fileLen: h.fileLen, flags: h.flags };
+      else if (h.fileId !== meta.fileId) return { accepted: false, reason: 'other file' };
+      if (seen.has(h.tileIndex)) return { accepted: false, reason: 'duplicate' };
+      seen.add(h.tileIndex);
+      addEquation(tileBlocks(meta.fileId, h.tileIndex, meta.K), tile.payload);
+      if (solved.size === meta.K) done = true;
+      return { accepted: true };
+    }
+
+    // Gaussian elimination over the remaining unknowns. Returns true if it finished.
+    function eliminate() {
+      if (!meta || done) return done;
+      const unknown = []; for (let b = 0; b < meta.K; b++) if (!solved.has(b)) unknown.push(b);
+      const col = new Map(unknown.map((b, i) => [b, i]));
+      const n = unknown.length; if (n === 0) { done = true; return true; }
+      const W = Math.ceil(n / 32);
+      const rows = pending.map(eq => { const bits = new Uint32Array(W); for (const b of eq.idx) { const c = col.get(b); bits[c >> 5] |= 1 << (c & 31); } return { bits, data: eq.data.slice() }; }); // copy: a failed pass must leave pending untouched
+      let rank = 0; const pivots = [];
+      for (let c = 0; c < n && rank < rows.length; c++) {
+        let p = -1; for (let r = rank; r < rows.length; r++) if (rows[r].bits[c >> 5] & (1 << (c & 31))) { p = r; break; }
+        if (p < 0) continue;
+        [rows[rank], rows[p]] = [rows[p], rows[rank]];
+        const pr = rows[rank];
+        for (let r = 0; r < rows.length; r++) if (r !== rank && (rows[r].bits[c >> 5] & (1 << (c & 31)))) { for (let w = 0; w < W; w++) rows[r].bits[w] ^= pr.bits[w]; xorInto(rows[r].data, pr.data); }
+        pivots.push([rank, c]); rank++;
+      }
+      if (rank < n) return false;
+      for (const [r, c] of pivots) solved.set(unknown[c], rows[r].data);
+      pending = []; done = true; return true;
+    }
+
+    function progress() { return meta ? solved.size / meta.K : 0; }
+    function result() {
+      if (!done) return null;
+      const out = new Uint8Array(meta.fileLen);
+      for (let b = 0; b < meta.K; b++) out.set(solved.get(b).subarray(0, Math.min(BLOCK_LEN, meta.fileLen - b * BLOCK_LEN)), b * BLOCK_LEN);
+      return { container: out, flags: meta.flags };
+    }
+    return { accept, eliminate, progress, result, get meta() { return meta; }, get done() { return done; }, get tilesSeen() { return seen.size; }, get pendingCount() { return pending.length; } };
+  }
+
+  return { TILE, BLOCK_LEN, DATA_BYTES, FLAG_GZIP, makeEncoder, readTile, makeDecoder, packContainer, unpackContainer, tileBlocks, crc32 };
+})();
+// ==== CODEC END ====
+</script>
+
+<script>
+// ==== PAGE LAYOUT + UI ====
+const PAGES = { letter: { w: 8.5, h: 11, css: 'letter' }, a4: { w: 8.2677, h: 11.6929, css: 'A4' } };
+const MARGIN = 0.35, HEADER_H = 0.32, GUTTER = 2; // inches, inches, cells
+
+let state = { file: null, name: '', original: null, container: null, flags: 0, enc: null, layout: null, pages: [], tileCount: 0 };
+
+const $ = id => document.getElementById(id);
+const log = (msg, cls) => { const p = document.createElement('p'); if (cls) p.className = cls; p.textContent = msg; $('log').appendChild(p); return p; };
+const fmtBytes = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(2) + ' MB';
+
+function computeLayout() {
+  const page = PAGES[$('pagesize-sel').value];
+  const cell = parseFloat($('cell').value);
+  const pitch = (PS.TILE + GUTTER) * cell;
+  const cols = Math.floor((page.w - 2 * MARGIN) / pitch);
+  const rows = Math.floor((page.h - 2 * MARGIN - HEADER_H) / pitch);
+  const x0 = (page.w - cols * pitch + GUTTER * cell) / 2;
+  const y0 = MARGIN + HEADER_H + (page.h - MARGIN - HEADER_H - rows * pitch + GUTTER * cell - MARGIN) / 2;
+  return { page, cell, pitch, cols, rows, perPage: cols * rows, x0, y0 };
+}
+
+function tilePath(m) {
+  // one path per tile in cell units, horizontal runs merged; positioned by a <g transform>
+  const parts = [];
+  for (let y = 0; y < PS.TILE; y++) {
+    let x = 0;
+    while (x < PS.TILE) {
+      if (!m[y * PS.TILE + x]) { x++; continue; }
+      let run = 1; while (x + run < PS.TILE && m[y * PS.TILE + x + run]) run++;
+      parts.push(`M${x} ${y}h${run}v1h-${run}z`);
+      x += run;
+    }
+  }
+  return parts.join('');
+}
+
+function renderPage(pi, firstTile, lastTile, totalPages) {
+  const L = state.layout, P = L.page;
+  const W = P.w * 1000, H = P.h * 1000;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${P.w}in" height="${P.h}in" shape-rendering="crispEdges" data-page="${pi}">`;
+  svg += `<rect width="${W}" height="${H}" fill="#fff"/>`;
+  const title = `${state.name}, page ${pi + 1} of ${totalPages}`;
+  const meta = `Paperstream v0. ${lastTile - firstTile} tiles, ${PS.TILE}×${PS.TILE} cells at ${L.cell} in. ${fmtBytes(state.container.length)} in ${state.enc.K} blocks. Sweep any page in any order.`;
+  svg += `<text x="${MARGIN * 1000}" y="${(MARGIN + 0.10) * 1000}" font-family="Helvetica, Arial, sans-serif" font-size="110" fill="#000">${escapeXml(title)}</text>`;
+  svg += `<text x="${MARGIN * 1000}" y="${(MARGIN + 0.24) * 1000}" font-family="Helvetica, Arial, sans-serif" font-size="80" fill="#000">${escapeXml(meta)}</text>`;
+  const s = L.cell * 1000;
+  for (let t = firstTile; t < lastTile; t++) {
+    const k = t - firstTile, r = Math.floor(k / L.cols), c = k % L.cols;
+    const ox = (L.x0 + c * L.pitch) * 1000, oy = (L.y0 + r * L.pitch) * 1000;
+    svg += `<g transform="translate(${ox.toFixed(3)} ${oy.toFixed(3)}) scale(${s})"><path d="${tilePath(state.enc.tile(t))}" fill="#000"/></g>`;
+  }
+  svg += `</svg>`;
+  return svg;
+}
+function escapeXml(s) { return s.replace(/[<>&"]/g, ch => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[ch])); }
+
+async function compress(bytes) {
+  if (typeof CompressionStream === 'undefined') return { data: bytes, flags: 0 };
+  const buf = await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+  return { data: new Uint8Array(buf), flags: PS.FLAG_GZIP };
+}
+async function decompress(bytes, flags) {
+  if (!(flags & PS.FLAG_GZIP)) return bytes;
+  const buf = await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+async function encode() {
+  $('log').textContent = '';
+  const t0 = performance.now();
+  const { data, flags } = await compress(state.original);
+  state.flags = flags;
+  state.container = PS.packContainer(state.name, data);
+  state.enc = PS.makeEncoder(state.container, flags);
+  state.layout = computeLayout();
+  const L = state.layout;
+  const extra = Math.max(0, parseInt($('redundancy').value, 10) || 0);
+  const wanted = Math.ceil(state.enc.K * (1 + extra / 100));
+  const pages = Math.max(1, Math.ceil(wanted / L.perPage));
+  state.tileCount = pages * L.perPage; // fill the last page: free redundancy
+  const host = $('pages'); host.innerHTML = '';
+  state.pages = [];
+  for (let p = 0; p < pages; p++) {
+    const svg = renderPage(p, p * L.perPage, (p + 1) * L.perPage, pages);
+    state.pages.push(svg);
+    host.insertAdjacentHTML('beforeend', svg);
+    await new Promise(r => setTimeout(r, 0));
+  }
+  $('pagesize').textContent = `@page { size: ${L.page.css}; margin: 0; }`;
+  document.documentElement.style.setProperty('--page-w', L.page.w + 'in');
+  document.documentElement.style.setProperty('--page-h', L.page.h + 'in');
+
+  const stats = $('stats'); stats.hidden = false; stats.innerHTML = '';
+  const rawPerPage = L.perPage * PS.BLOCK_LEN;
+  const rowsOut = [
+    ['Original', fmtBytes(state.original.length)],
+    [flags ? 'Compressed' : 'Stored (no gzip)', fmtBytes(data.length)],
+    ['Blocks', `${state.enc.K} × ${PS.BLOCK_LEN} B`],
+    ['Tiles printed', `${state.tileCount} (${state.tileCount - state.enc.K} spare)`],
+    ['Pages', String(pages)],
+    ['Tiles per page', `${L.cols} × ${L.rows}`],
+    ['Payload per page', fmtBytes(rawPerPage)],
+    ['Density', `${Math.round(1 / L.cell)} cells/in`],
+    ['Encode time', `${((performance.now() - t0) / 1000).toFixed(1)} s`],
+  ];
+  for (const [k, v] of rowsOut) { const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); dd.textContent = v; stats.append(dt, dd); }
+  $('print').disabled = false; $('verify').disabled = false;
+}
+
+// Rasterize each SVG page to a canvas, sample every cell at its centre, decode.
+async function verify() {
+  $('log').textContent = '';
+  const L = state.layout, P = L.page;
+  const ppc = 2; // canvas pixels per cell
+  const ppi = ppc / L.cell;
+  const cw = Math.round(P.w * ppi), ch = Math.round(P.h * ppi);
+  const dec = PS.makeDecoder();
+  let tilesRead = 0, tilesBad = 0;
+  const t0 = performance.now();
+  const status = log('Rasterizing…');
+  for (let pi = 0; pi < state.pages.length; pi++) {
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('SVG rasterization failed')); img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(state.pages[pi]); });
+    const cv = document.createElement('canvas'); cv.width = cw; cv.height = ch;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cw, ch);
+    ctx.drawImage(img, 0, 0, cw, ch);
+    const px = ctx.getImageData(0, 0, cw, ch).data;
+    const m = new Uint8Array(PS.TILE * PS.TILE);
+    for (let r = 0; r < L.rows; r++) for (let c = 0; c < L.cols; c++) {
+      const ox = L.x0 + c * L.pitch, oy = L.y0 + r * L.pitch;
+      for (let y = 0; y < PS.TILE; y++) for (let x = 0; x < PS.TILE; x++) {
+        const sx = Math.floor((ox + (x + 0.5) * L.cell) * ppi), sy = Math.floor((oy + (y + 0.5) * L.cell) * ppi);
+        m[y * PS.TILE + x] = px[(sy * cw + sx) * 4] < 128 ? 1 : 0;
+      }
+      const tile = PS.readTile(m);
+      if (!tile) { tilesBad++; continue; }
+      tilesRead++;
+      dec.accept(tile);
+    }
+    status.textContent = `Page ${pi + 1}/${state.pages.length}: ${tilesRead} tiles read, ${tilesBad} unreadable, ${Math.round(dec.progress() * 100)}% of blocks recovered`;
+    await new Promise(r => setTimeout(r, 0));
+    if (dec.done) break;
+  }
+  if (!dec.done) { log('Peeling stalled, running elimination…'); dec.eliminate(); }
+  if (!dec.done) { log(`Could not rebuild the file: ${Math.round(dec.progress() * 100)}% of blocks recovered from ${dec.tilesSeen} tiles.`, 'bad'); return; }
+  const { container, flags } = dec.result();
+  const { name, data } = PS.unpackContainer(container);
+  const bytes = await decompress(data, flags);
+  const same = bytes.length === state.original.length && PS.crc32(bytes) === PS.crc32(state.original);
+  log(`Rebuilt ${name}, ${fmtBytes(bytes.length)} from ${dec.tilesSeen} tiles in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
+  log(same ? 'Byte-for-byte identical to the original.' : 'Output differs from the original.', same ? 'ok' : 'bad');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([bytes])); a.download = name; a.textContent = 'Download the rebuilt file';
+  const p = document.createElement('p'); p.appendChild(a); $('log').appendChild(p);
+}
+
+// ---- wiring ----
+async function setFile(f) {
+  if (!f) return;
+  state.file = f; state.name = f.name; state.original = new Uint8Array(await f.arrayBuffer());
+  $('filename').innerHTML = `${escapeXml(f.name)} <span>${fmtBytes(f.size)}</span>`;
+  $('encode').disabled = false; $('print').disabled = true; $('verify').disabled = true;
+}
+$('file').addEventListener('change', e => setFile(e.target.files[0]));
+const drop = $('drop');
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); setFile(e.dataTransfer.files[0]); });
+$('use-paste').addEventListener('click', () => {
+  const t = $('paste').value; if (!t) { log('Paste some text first.', 'bad'); return; }
+  setFile(new File([t], 'pasted.txt', { type: 'text/plain' }));
+});
+$('use-sample').addEventListener('click', () => {
+  // 150 KB of pseudo-English so compression behaves like real text
+  const words = 'the of and to in a is that for it as was with be by on not he this are or his from at which but have an had they you were their one all we can her has there been if more when will would who so no she said what its about than into them only other time new some could these two may then do first any my now such like our over man me even most made after also did many before must through back years where much your way well down should because each just those people how too little state good very make world still own see men work long get here between both life being under never day same another know while last might us great old year off come since against go came right used take three'.split(' ');
+  let s = 0x1234567, out = [];
+  while (out.join(' ').length < 150000) { const line = []; for (let i = 0; i < 12; i++) { s = (s * 1103515245 + 12345) >>> 0; line.push(words[s % words.length]); } out.push(line.join(' ') + '.'); }
+  setFile(new File([out.join('\n')], 'sample.txt', { type: 'text/plain' }));
+});
+$('encode').addEventListener('click', () => encode().catch(err => log(err.message, 'bad')));
+$('print').addEventListener('click', () => window.print());
+$('verify').addEventListener('click', () => verify().catch(err => log(err.message, 'bad')));
+</script>
+</body>
+</html>
