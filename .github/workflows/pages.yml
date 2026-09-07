@@ -1,0 +1,35 @@
+# Publish paperstream.html to GitHub Pages so the live camera works on a phone
+# (browsers only grant the camera to a top-level https page). Only the two
+# HTML files are published; tests and docs stay in the repo.
+name: Pages
+on:
+  push:
+    branches: [main, master, claude/project-setup-review-enpa8q]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run codec and scanner tests
+        run: node test/codec-stress.test.mjs && node test/vision-synthetic.test.mjs
+      - name: Collect the site
+        run: mkdir -p dist && cp paperstream.html index.html dist/
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - id: deployment
+        uses: actions/deploy-pages@v4
